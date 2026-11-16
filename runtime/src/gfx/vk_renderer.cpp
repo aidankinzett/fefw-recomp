@@ -44,6 +44,7 @@ constexpr uint32_t kStallRecreate = 3;
 // cannot test (#100 windowed only on a Radeon 8060S, #92 / #65 on the Steam Deck) then say which GPU, driver, window mode and size.
 std::mutex g_lost_ctx_mu;
 std::string g_lost_ctx;
+std::atomic<std::string (*)()> g_lost_note{nullptr};   // set_device_lost_note
 
 const char* window_mode_name() {
     switch (platform::fullscreen_mode()) {
@@ -70,6 +71,7 @@ const char* window_mode_name() {
         std::lock_guard<std::mutex> lk(g_lost_ctx_mu);
         if (!g_lost_ctx.empty()) text += g_lost_ctx;
     }
+    if (auto note = g_lost_note.load()) text += note();
     text += frames == 0
                 ? "  What to try: the first frame never finished on the GPU. Update the graphics driver; if it happens in one window mode only "
                   "(windowed, say), use another (F1 > Display) and tell us which works; [gfx] gpu in fefw.ini picks another GPU.\n"
@@ -132,6 +134,8 @@ const ImageState kPresent = {VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_
 const ImageState kFfxPresent = {VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_NONE, 0};
 
 }  // namespace
+
+void set_device_lost_note(std::string (*fn)()) { g_lost_note.store(fn); }
 
 // ---- names ------------------------------------------------------------------------------------------------------------
 const char* present_mode_name(PresentMode m) {

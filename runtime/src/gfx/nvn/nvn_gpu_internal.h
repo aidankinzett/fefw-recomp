@@ -112,7 +112,9 @@ uint64_t current_serial();        // the serial of the submission being recorded
 // Writes a GPU timestamp after everything recorded so far; the time since the previous stamp of the submission becomes a trace event
 // `gp:<label>` (arg = draws or 0). No-ops when the profiler is off.
 bool gpass_on();
-void gpass_stamp(Frame& f, const char* label, uint32_t arg = 0);
+// With [diag] gpu_breadcrumbs the stamp is also a breadcrumb (nvn_gpu.cpp crumb_stamp): skipped when in_pass, as a transfer command
+// cannot be recorded inside a render pass. gpass_on() is true when either is on.
+void gpass_stamp(Frame& f, const char* label, uint32_t arg = 0, bool in_pass = false);
 
 // ---- barriers ---------------------------------------------------------------------------------------------------------------
 void image_barrier(VkCommandBuffer cb, VkImage image, VkImageLayout from, VkImageLayout to, VkImageAspectFlags aspect,

@@ -570,9 +570,10 @@ void xfb_end_in_pass() {
     g_xfb_slot_written[g_xfb_cur] = true;
 }
 
-// GPU pass profiler: closes the interval since the previous stamp under this label (no-op unless [prof] gpu_passes).
+// GPU pass profiler: closes the interval since the previous stamp under this label (no-op unless [prof] gpu_passes or [diag] gpu_breadcrumbs;
+// a breadcrumb is not written while a pass is open).
 void gstamp(const char* label) {
-    if (gpass_on()) gpass_stamp(*F, label, 0);
+    if (gpass_on()) gpass_stamp(*F, label, 0, P.open);
 }
 
 // Two texture objects over one image (as shares_image further down, which this code cannot see yet).

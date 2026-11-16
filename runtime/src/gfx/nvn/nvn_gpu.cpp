@@ -72,6 +72,9 @@ struct Slot {
     uint64_t sets_live = 0;               // descriptor sets allocated from this slot's pools since the last reset (vk.descriptor_sets)
     uint32_t gp_n = 0;                    // GPU pass profiler: timestamps written by the submission
     std::vector<std::pair<std::string, uint32_t>> gp_labels;   // label and argument of each interval (stamp i closes interval i)
+    // [diag] gpu_breadcrumbs: the label of each step of the submission; the GPU writes how many it has finished (crumb_begin, crumb_stamp)
+    std::vector<std::string> crumb_labels;
+    uint64_t crumb_serial = 0;            // the submission those labels belong to
     // split_submission: command buffers of this slot's pool already handed to the GPU in this submission, and free ones (all reset with the pool)
     std::vector<VkCommandBuffer> split_used, split_free;
     uint64_t frame = 0;                   // [prof] gpu_stats: presents counted when the submission was recorded (the frame it belongs to)
@@ -148,6 +151,7 @@ struct Gpu {
     StagingRing ring;
     VkQueryPool qpool = VK_NULL_HANDLE;   // frame trace: two timestamps per slot
     VkQueryPool gpool = VK_NULL_HANDLE;   // GPU pass profiler ([prof] gpu_passes): kGpMax timestamps per slot
+    gfx::Buffer crumbs;                   // [diag] gpu_breadcrumbs: two words per slot, (serial, steps finished), written by the GPU
     GpuStats stats;
     std::atomic<uint64_t> gpu_busy_ns{0};   // nvn.cnt.gpu_us (qpool: frame trace or [diag] soak_csv)
     uint64_t gpu_last_end = 0;              // render thread: last submission's end timestamp
@@ -786,12 +790,67 @@ void run_on_render_thread(const std::function<void()>& fn) {
     cv.wait(lk, [&] { return done; });
 }
 
-bool gpass_on() { return g && g->gpool != VK_NULL_HANDLE; }
+bool gpass_on() { return g && (g->gpool != VK_NULL_HANDLE || g->crumbs.buffer != VK_NULL_HANDLE); }
 
-void gpass_stamp(Frame& f, const char* label, uint32_t arg) {
-    if (!g || !g->gpool || !f.slot) return;
+namespace {
+// [diag] gpu_breadcrumbs: the GPU says how far it got. At the start of a submission it writes (serial, 0) into its slot's two words; at every
+// stamp of the pass profiler outside a render pass it waits for everything recorded before (a full barrier) and writes the number of steps
+// finished. After VK_ERROR_DEVICE_LOST the words of the submissions that never completed name the step the GPU stopped in (gpu_breadcrumb_report).
+// The barriers serialise the GPU's work, so this is for diagnostic runs (and a hang it makes go away is a finding too).
+VkDeviceSize crumb_offset(const Slot& s) { return static_cast<VkDeviceSize>(&s - g->slots) * 8; }
+
+void crumb_begin(Frame& f, Slot& s) {
+    s.crumb_labels.clear();
+    s.crumb_serial = f.serial;
+    vkCmdFillBuffer(f.cb, g->crumbs.buffer, crumb_offset(s), 4, static_cast<uint32_t>(f.serial));
+    vkCmdFillBuffer(f.cb, g->crumbs.buffer, crumb_offset(s) + 4, 4, 0);
+}
+
+void crumb_stamp(Frame& f, Slot& s, const char* label, uint32_t arg) {
+    memory_barrier(f.cb);   // the write below happens after everything recorded before it has finished
+    s.crumb_labels.emplace_back(arg ? std::string(label) + " (" + std::to_string(arg) + " draws)" : std::string(label));
+    vkCmdFillBuffer(f.cb, g->crumbs.buffer, crumb_offset(s) + 4, 4, static_cast<uint32_t>(s.crumb_labels.size()));
+}
+
+// gfx::set_device_lost_note: one paragraph of the device-lost report. Reads the slots without the render thread's lock: the report is
+// written once, while the process is ending.
+std::string gpu_breadcrumb_report() {
+    if (!g || !g->crumbs.buffer || !g->crumbs.mapped) return {};
+    g->dev->invalidate_buffer(g->crumbs);
+    const auto* w = static_cast<const volatile uint32_t*>(g->crumbs.mapped);
+    const uint64_t done = g->completed.load(std::memory_order_relaxed);
+    std::vector<const Slot*> open;
+    for (const Slot& s : g->slots)
+        if (s.crumb_serial > done) open.push_back(&s);
+    std::sort(open.begin(), open.end(), [](const Slot* a, const Slot* b) { return a->crumb_serial < b->crumb_serial; });
+    std::string out = "  GPU breadcrumbs ([diag] gpu_breadcrumbs): ";
+    if (open.empty()) return out + "every submission recorded had completed.\n";
+    out += std::to_string(open.size()) + " submission(s) had not completed (the first is where the GPU stopped):\n";
+    char b[640];
+    for (const Slot* s : open) {
+        const size_t i = static_cast<size_t>(s - g->slots);
+        const uint32_t serial = w[i * 2], steps = w[i * 2 + 1];
+        const size_t n = s->crumb_labels.size();
+        if (serial != static_cast<uint32_t>(s->crumb_serial)) {
+            std::snprintf(b, sizeof b, "    submission %llu: not started on the GPU (%zu steps)\n", static_cast<unsigned long long>(s->crumb_serial), n);
+        } else if (steps >= n) {
+            std::snprintf(b, sizeof b, "    submission %llu: all %zu steps finished (stopped after them)\n", static_cast<unsigned long long>(s->crumb_serial), n);
+        } else {
+            std::snprintf(b, sizeof b, "    submission %llu: %u of %zu steps finished; stopped in step %u: %s%s%s\n",
+                          static_cast<unsigned long long>(s->crumb_serial), steps, n, steps + 1, s->crumb_labels[steps].c_str(),
+                          steps ? ", after: " : "", steps ? s->crumb_labels[steps - 1].c_str() : "");
+        }
+        out += b;
+    }
+    return out;
+}
+}  // namespace
+
+void gpass_stamp(Frame& f, const char* label, uint32_t arg, bool in_pass) {
+    if (!g || !f.slot) return;
     Slot& s = *static_cast<Slot*>(f.slot);
-    if (s.gp_n >= kGpMax) return;
+    if (g->crumbs.buffer && !in_pass) crumb_stamp(f, s, label, arg);   // a transfer command is not allowed inside a render pass
+    if (!g->gpool || s.gp_n >= kGpMax) return;
     vkCmdWriteTimestamp2(f.cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, g->gpool, static_cast<uint32_t>(&s - g->slots) * kGpMax + s.gp_n);
     s.gp_labels.emplace_back(label, arg);
     s.gp_n++;
@@ -926,6 +985,7 @@ uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint
     std::optional<cmdq::Scope> qscope;
     qscope.emplace();
     const uint32_t qi = static_cast<uint32_t>(&s - g->slots) * 2;
+    if (g->crumbs.buffer && !unsignalled) crumb_begin(f, s);   // [diag] gpu_breadcrumbs (an unsignalled submission has no serial of its own)
     if (g->gpool) {
         vkCmdResetQueryPool(s.cb, g->gpool, static_cast<uint32_t>(&s - g->slots) * kGpMax, kGpMax);
         s.gp_n = 0;
@@ -963,9 +1023,10 @@ uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint
         s.timed = false;
         s.gp_n = 0;
         s.gp_labels.clear();
+        if (g->crumbs.buffer && !unsignalled) crumb_begin(f, s);
         aborted = true;
     }
-    if (g->gpool && !aborted) gpass_stamp(f, "tail", 0);
+    if (gpass_on() && !aborted) gpass_stamp(f, "tail", 0);
     if (g->qpool && !aborted) vkCmdWriteTimestamp(s.cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g->qpool, qi + 1);
     qscope.reset();       // every queued call made
     vkEndCommandBuffer(s.cb);
@@ -1447,6 +1508,21 @@ bool bring_up(gfx::Device& dev, gfx::Renderer* rend, FrameLimiter* limiter, bool
         if (vkCreateQueryPool(dev.device(), &qi, nullptr, &gp->gpool) != VK_SUCCESS) gp->gpool = VK_NULL_HANDLE;
         else vk_gauge_query_pools().add(1);
     }
+    // [diag] gpu_breadcrumbs (default off): the device-lost report names the step of the GPU's work it stopped in (crumb_stamp). A full
+    // barrier at every pass, dispatch and copy step: for diagnostic runs.
+    if (config_get_bool("diag", "gpu_breadcrumbs", false)) {
+        // only the GPU writes it (crumb_begin sets a slot's words before its first step), so the CPU never dirties a cached line of it
+        if (dev.create_buffer(kSlots * 8, VK_BUFFER_USAGE_TRANSFER_DST_BIT, gfx::MemoryUse::Readback, &gp->crumbs, "nvn breadcrumbs") == VK_SUCCESS &&
+            gp->crumbs.mapped) {
+            gfx::set_device_lost_note(&gpu_breadcrumb_report);
+            NXLOG_I(kTag, "GPU breadcrumbs on ([diag] gpu_breadcrumbs): a device-lost report names the step the GPU stopped in; every pass, "
+                          "dispatch and copy waits for the work before it");
+        } else {
+            if (gp->crumbs.buffer) dev.destroy_buffer(gp->crumbs);
+            gp->crumbs = gfx::Buffer{};
+            NXLOG_W(kTag, "GPU breadcrumbs: no host-visible buffer for them; off");
+        }
+    }
     if (ft::on()) extras::lowlat_set_backlog_fn([]() -> uint64_t {      // latency probe: submissions the GPU has not finished
         if (!g || !g->timeline) return 0;
         uint64_t v = 0;
@@ -1557,6 +1633,10 @@ void tear_down() {
     }
     if (gp->qpool) { vkDestroyQueryPool(d.device(), gp->qpool, nullptr); vk_gauge_query_pools().sub(1); }
     if (gp->gpool) { vkDestroyQueryPool(d.device(), gp->gpool, nullptr); vk_gauge_query_pools().sub(1); }
+    if (gp->crumbs.buffer) {
+        gfx::set_device_lost_note(nullptr);
+        d.destroy_buffer(gp->crumbs);
+    }
     if (gp->timeline) { vkDestroySemaphore(d.device(), gp->timeline, nullptr); vk_gauge_semaphores().sub(1); }
     g = nullptr;
     delete gp;
