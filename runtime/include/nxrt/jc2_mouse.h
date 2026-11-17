@@ -17,7 +17,7 @@
 //
 // The play layer feeds the host mouse once per frame (motion counts, buttons, wheel), tells hid about other devices, captures the mouse
 // while jc2_mouse_engaged() (the game draws its own cursor and the motion must not stop at the window's edge) and releases it as soon
-// as the mouse is lifted. All functions are thread safe and cheap.
+// as the mouse is lifted or a game layer asks for the Windows pointer (jc2_mouse_request). All functions are thread safe and cheap.
 #pragma once
 #include <cstdint>
 
@@ -45,6 +45,7 @@ void jc2_mouse_feed(const HostMouse& m);
 // seen over the picture), so the game's own pointer can start there; and where the game's pointer is now (picture 0..1), so play mode
 // puts the Windows pointer there when it frees the mouse.
 bool jc2_mouse_host_pointer(float* u, float* v);
+bool jc2_mouse_pointer_free();                          // the Windows pointer is over the picture now (not captured)
 void jc2_mouse_set_return_point(float u, float v);
 bool jc2_mouse_take_return_point(float* u, float* v);   // play mode: the point, once
 // A key or a pad button / stick was used: the mouse is lifted at once (auto mode).
@@ -61,12 +62,25 @@ struct Jc2Stats {
 };
 Jc2Stats jc2_mouse_stats();
 
-// Camera owner / game layer: the game is in a mode that wants a pointer (kept for games with a camera of their own; Fortune's Weave
-// does not use it).
+// Camera owner / game layer: the game is in a mode that wants a pointer (Fortune's Weave: its map cursor or a menu follows the Windows
+// pointer, fefw_mapmouse.cpp / fefw_menumouse.cpp).
 void jc2_mouse_request(bool want);
 // Play mode: true = do not capture the mouse for the camera (mode on, or auto with a request).
 bool jc2_mouse_wants_pointer();
+// Play mode: a game layer asked for the Windows pointer (jc2_mouse_request): the mouse is not captured for the Joy-Con 2 mouse either
+// ([mouse] jc2_capture) and the Windows pointer stays visible.
+bool jc2_mouse_requested();
 // True while the virtual Joy-Con 2 mouse is listed, the mode is not off and the feed is live (focused window, a feed in the last 250 ms).
 bool jc2_mouse_active();
+
+// Game layer, steering the Joy-Con 2 mouse itself (Fortune's Weave's map cursor following the Windows pointer): while held, the host
+// mouse's motion still wakes the mouse and moves the Windows pointer but no longer reaches the game; jc2_mouse_inject adds motion of its
+// own (pointer-range units) to the next sample. Buttons and the wheel are not affected.
+void jc2_mouse_hold_motion(bool hold);
+void jc2_mouse_inject(float dx, float dy);
+// Game layer: the thing under the pointer is not the game's selection yet (a menu entry or a map cell it is steering to). While set, play
+// mode keeps a new click back and presses it once this clears (at most 600 ms later), so the click picks what is under the pointer.
+void jc2_mouse_defer_clicks(bool defer);
+bool jc2_mouse_clicks_deferred();
 
 }  // namespace nxrt::hid

@@ -164,6 +164,12 @@ Read in main (`work`-side scripts, not shipped); `runtime/games/fefw/fefw_mouse.
 - While it is on its surface play mode captures the mouse (`[mouse] jc2_capture`): relative raw motion, no Windows pointer (the game
   draws its own), no window edge. Released when it is lifted, on focus loss and while the F1 menu is open. Left / right click are npad
   R / ZR while it is on its surface (held 50 ms at least), as the Joy-Con 2 (R)'s own buttons; the click that puts it down is not a press.
+- Pointing with the Windows pointer (fefw `[fefw] map_pointer` / `menu_pointer`): while the map cursor or a menu follows the pointer the
+  game layer calls `jc2_mouse_request(true)` (no capture, the Windows pointer shown; kept 3 s after), `jc2_mouse_hold_motion(true)` (the
+  PC mouse's motion still wakes the mouse but no longer reaches the game) and sends motion of its own with `jc2_mouse_inject`. With
+  `jc2_mouse_defer_clicks(true)` (what is under the pointer is not the game's selection yet) a new left click is held back, both as npad
+  R and as the mouse's own left button, and pressed once the flag clears (at most 600 ms later). When a capture ends for the request the
+  Windows pointer comes back at the game layer's return point (the map cursor or the selected entry).
 - Logs: InitializeNmouse/InitializeJcms with the block address, the device listing, the first three StartJcms and SetNmousePointerPosition
   calls, every on-surface / lifted change (first 200), the first three samples with movement, buttons or wheel, and (fefw) `game mouse
   controls ON/off` with the counts and the game's own thresholds once.

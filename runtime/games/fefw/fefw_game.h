@@ -84,6 +84,16 @@ struct MouseInfo {
 };
 void mouse_install(uint64_t base);
 void mouse_frame();                    // main thread, once per frame
+void mapmouse_install(uint64_t base);  // fefw_mapmouse.cpp: the mouse on the maps
+bool mapmouse_frame();                 // main thread, once per frame: true while the map cursor follows the pointer
+bool mapmouse_pointer(float* u, float* v);   // the pointer on the picture (0..1, v down), or the test pointer
+bool mapmouse_pointer_live();          // ... and it is where it is now (not captured)
+void menumouse_install(uint64_t base); // fefw_menumouse.cpp: menu entries follow the pointer ([fefw] menu_pointer)
+bool menumouse_frame(bool map_busy);   // main thread, once per frame: true while a menu has the pointer
+bool mapmouse_pending();               // the map cursor is still on its way to the cell under the pointer
+bool menumouse_pending();              // the selection is still on its way to the entry under the pointer
+void uipanes_install(uint64_t base);   // fefw_uipanes.cpp: pane census ([fefw] ui_pane_log)
+void uipanes_frame();
 MouseInfo mouse_info();
 
 // fefw_prompts.cpp: the button glyphs of the game's text follow the controller in use ([prompts] style; notes/prompts.md)

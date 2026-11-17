@@ -243,6 +243,8 @@ struct G {
     float jc2_dx = 0, jc2_dy = 0;        // mouse motion since the last feed, raw counts (relative mode) or window pixels
     bool jc2_captured = false;           // play captured the mouse for the Joy-Con 2 mouse (not for a camera)
     uint64_t jc2_click_until[2] = {};    // a click shorter than a frame still reaches the game: left (R), right (ZR) held until then
+    uint64_t jc2_click_wait[2] = {};     // a left click the game layer keeps back (hid::jc2_mouse_defer_clicks), at most until then
+    uint64_t jc2_click_released = 0;     // that click, once let go, holds the Joy-Con 2 mouse's left button until then
     uint64_t last_status_ns = 0;
     bool warned_thread = false;
 
@@ -901,8 +903,9 @@ int update_hook(::Ctx*, uint64_t, void*) {
         const bool free_ok = platform::focused() && !platform::minimized() && !overlay_visible && st.capture_state.load() == 0;
         const bool want_cam = st.capture_mouse && free_ok && playing && !hid::jc2_mouse_wants_pointer();
         // The Joy-Con 2 mouse on its surface: the game draws its own cursor and turns its camera by the motion, so the mouse is captured
-        // (raw counts, no OS cursor, no window edge) until another device lifts it ([mouse] jc2_capture).
-        const bool want_jc2 = st.settings.mouse.jc2_capture && free_ok && hid::jc2_mouse_engaged();
+        // (raw counts, no OS cursor, no window edge) until another device lifts it ([mouse] jc2_capture). Not while a game layer points with
+        // the Windows pointer (hid::jc2_mouse_request: Fortune's Weave's map cursor and menus).
+        const bool want_jc2 = st.settings.mouse.jc2_capture && free_ok && hid::jc2_mouse_engaged() && !hid::jc2_mouse_requested();
         const bool want = want_cam || want_jc2;
         if (want != platform::relative_mouse()) {
             platform::set_relative_mouse(want);
@@ -974,7 +977,8 @@ int update_hook(::Ctx*, uint64_t, void*) {
         if (const Act a = gp && gp->menu_frame ? gp->menu_frame(menu_up, geo) : Act::None; a != Act::None) st.engine->pulse(a, now);
         if (st.overlay && st.pointer_draw) st.overlay->set_pointer(menu_up && ptr.enabled() && ptr.cursor_visible(menu_up), ptr.x(), ptr.y(), true);
         // With the Joy-Con 2 mouse on its surface the game draws its own cursor: the OS cursor is hidden (unless the overlay is up).
-        const bool game_cursor = !overlay_visible && hid::jc2_mouse_engaged();
+        // A game layer that points with the Windows pointer (hid::jc2_mouse_request: Fortune's Weave's map cursor and menus) keeps it visible.
+        const bool game_cursor = !overlay_visible && hid::jc2_mouse_engaged() && !hid::jc2_mouse_requested();
         if (st.window && !platform::relative_mouse())
             platform::set_cursor_visible(!game_cursor && (overlay_visible || !(ptr.enabled() && menu_up) || ptr.cursor_visible(menu_up)));
         if (st.window) {   // the Joy-Con 2 mouse (hid): the motion, the buttons and the wheel
@@ -994,6 +998,27 @@ int update_hook(::Ctx*, uint64_t, void*) {
             }
             hm.buttons = overlay_visible ? 0u : st.jc2_buttons;
             hm.presses = focused && inside ? st.jc2_presses : 0u;
+            // A left click the game layer keeps back (hid::jc2_mouse_defer_clicks: what is under the pointer is not the game's selection
+            // yet) is pressed once it lets go, at most 600 ms later; meanwhile neither the mouse's button nor npad R shows it.
+            if (hid::jc2_mouse_engaged() && focused) {
+                const bool deferred = hid::jc2_mouse_clicks_deferred();
+                if ((hm.presses & 1u) && deferred) {
+                    st.jc2_click_wait[0] = now + 600 * kMs;
+                    hm.presses &= ~1u;
+                }
+                if (st.jc2_click_wait[0]) {
+                    if (!deferred || now >= st.jc2_click_wait[0]) {
+                        st.jc2_click_wait[0] = 0;
+                        hm.presses |= 1u;
+                        st.jc2_click_until[0] = st.jc2_click_released = now + 50 * kMs;
+                    } else {
+                        hm.buttons &= ~1u;
+                    }
+                }
+                if (now < st.jc2_click_released) hm.buttons |= 1u;     // a click let go late is held 50 ms for the game to see
+            } else {
+                st.jc2_click_wait[0] = st.jc2_click_released = 0;
+            }
             hm.wheel_x = st.jc2_wheel_x;
             hm.wheel_y = st.jc2_wheel_y;
             hm.focused = focused;
@@ -1013,8 +1038,8 @@ int update_hook(::Ctx*, uint64_t, void*) {
                 constexpr uint32_t kBits[2] = {1u << 0, 1u << 1};
                 const uint64_t kNpad[2] = {hid::btn(hid::kBtnR), hid::btn(hid::kBtnZR)};
                 for (int i = 0; i < 2; ++i) {
-                    if (hm.presses & kBits[i]) st.jc2_click_until[i] = now + 50 * kMs;
-                    if ((st.jc2_buttons & kBits[i]) || now < st.jc2_click_until[i]) clicks |= kNpad[i];
+                    if (hm.presses & kBits[i]) st.jc2_click_until[i] = std::max(st.jc2_click_until[i], now + 50 * kMs);
+                    if ((hm.buttons & kBits[i]) || now < st.jc2_click_until[i]) clicks |= kNpad[i];
                 }
             } else {
                 st.jc2_click_until[0] = st.jc2_click_until[1] = 0;

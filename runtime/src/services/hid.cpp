@@ -113,6 +113,8 @@ Jc2Feed& feed() {
 std::atomic<int> g_jc2_mode{-1};          // -1: not read from the config yet
 std::atomic<bool> g_jc2_request{false};
 std::atomic<bool> g_jc2_listed{false};    // the game set up Nmouse and the device is in its handle table
+std::atomic<bool> g_jc2_hold{false};      // jc2_mouse_hold_motion: the host's motion does not reach the game
+std::atomic<bool> g_jc2_defer{false};     // jc2_mouse_defer_clicks: a new left click waits
 std::atomic<bool> g_jc2_active{false};    // last sampled "on its surface"
 std::atomic<float> g_jc2_wake{8.0f};      // [mouse] jc2_wake: raw counts within kWakeWindowNs that put the mouse on its surface
 std::atomic<uint64_t> g_jc2_engages{0}, g_jc2_lifts{0}, g_jc2_recentres{0};
@@ -1290,6 +1292,7 @@ struct PointerHandover {
     std::mutex mu;
     float host_u = 0, host_v = 0;
     bool host = false;
+    bool host_free = false;      // the last feed had the Windows pointer over the picture (not captured)
     float ret_u = 0, ret_v = 0;
     bool ret = false;
 };
@@ -1326,14 +1329,17 @@ void jc2_mouse_feed(const HostMouse& m) {
     f.m = m;
     f.wheel_x += m.wheel_x;
     f.wheel_y += m.wheel_y;
-    f.dx += m.dx;
-    f.dy += m.dy;
+    if (!services::g_jc2_hold.load(std::memory_order_relaxed)) {     // held: the game layer steers the motion (jc2_mouse_inject)
+        f.dx += m.dx;
+        f.dy += m.dy;
+    }
     f.wake += m.wake;
     f.presses |= m.presses;
     f.last_ns = services::now_ns();
+    PointerHandover& h = handover();
+    std::lock_guard<std::mutex> lk2(h.mu);
+    h.host_free = m.pointer;
     if (m.pointer) {
-        PointerHandover& h = handover();
-        std::lock_guard<std::mutex> lk2(h.mu);
         h.host_u = m.u;
         h.host_v = m.v;
         h.host = true;
@@ -1349,6 +1355,12 @@ bool jc2_mouse_host_pointer(float* u, float* v) {
         *v = h.host_v;
     }
     return h.host;
+}
+
+bool jc2_mouse_pointer_free() {
+    PointerHandover& h = handover();
+    std::lock_guard<std::mutex> lk(h.mu);
+    return h.host_free;
 }
 
 void jc2_mouse_set_return_point(float u, float v) {
@@ -1405,8 +1417,23 @@ bool jc2_mouse_wants_pointer() {
     return services::g_jc2_listed.load() && services::g_jc2_request.load();
 }
 
+bool jc2_mouse_requested() {
+    return jc2_mouse_mode() != Jc2MouseMode::Off && services::g_jc2_listed.load() && services::g_jc2_request.load();
+}
+
 bool jc2_mouse_active() {
     return jc2_mouse_mode() != Jc2MouseMode::Off && services::g_jc2_listed.load() && services::jc2_feed_live();
+}
+
+void jc2_mouse_hold_motion(bool hold) { services::g_jc2_hold.store(hold, std::memory_order_relaxed); }
+void jc2_mouse_defer_clicks(bool defer) { services::g_jc2_defer.store(defer, std::memory_order_relaxed); }
+bool jc2_mouse_clicks_deferred() { return services::g_jc2_defer.load(std::memory_order_relaxed); }
+
+void jc2_mouse_inject(float dx, float dy) {
+    services::Jc2Feed& f = services::feed();
+    std::lock_guard<std::mutex> lk(f.mu);
+    f.dx += dx;
+    f.dy += dy;
 }
 
 }  // namespace nxrt::hid

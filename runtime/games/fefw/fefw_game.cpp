@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Fire Emblem: Fortune's Weave: the whole game module as one nxrt::game::Info (fefw_game.h). Play-mode hooks come here as they are found.
 #include "fefw_game.h"
+#include "nxrt/jc2_mouse.h"
 
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -95,6 +97,9 @@ constexpr uint64_t kPresentWrapper = 0x5d170;
 void install_all(uint64_t base, play::GameHost* host, const play::Settings& s) {
     play_install(base, host, s);
     mouse_install(base);
+    mapmouse_install(base);
+    menumouse_install(base);
+    uipanes_install(base);
     prompts_install(host);
 }
 void remove_all() {
@@ -104,6 +109,17 @@ void remove_all() {
 void frame_all(bool, double, play::GameFrame*) {
     prompts_frame();
     mouse_frame();
+    // The map cursor and the menus follow the Windows pointer while they have it: the PC mouse's motion does not reach the game, and the
+    // mouse is not captured (still free a few seconds after, so a dialogue between two menus does not capture and free it again).
+    const bool map_pointer = mapmouse_frame();
+    const bool menu_pointer = menumouse_frame(map_pointer);
+    static std::chrono::steady_clock::time_point last_pointing{};
+    const auto now = std::chrono::steady_clock::now();
+    if (map_pointer || menu_pointer) last_pointing = now;
+    hid::jc2_mouse_request(map_pointer || menu_pointer || now - last_pointing < std::chrono::seconds(3));
+    hid::jc2_mouse_hold_motion(map_pointer || menu_pointer);
+    hid::jc2_mouse_defer_clicks((map_pointer && mapmouse_pending()) || (menu_pointer && menumouse_pending()));
+    uipanes_frame();
 }
 
 // The picture's shape for play mode's pointer geometry (window <-> picture, the Joy-Con 2 mouse's pointer hand-over): the output when it
