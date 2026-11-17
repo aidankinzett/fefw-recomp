@@ -924,13 +924,18 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     }
 #endif
     // [dlss] frame_gen = fsr3: the FSR 3 swapchain presents and acquires on queues of its own (extras/framegen_ffx.h)
+    // FSR 3 frame generation: its swapchain presents, acquires and computes on three queues of its own beside the game's, all in the graphics
+    // family. Mesa's RADV (AMD on Linux) has one graphics queue: FFX's interpolation then runs without its swapchain (standalone mode, framegen_ffx.h).
     uint32_t fg_queues = 0;
-    if (!headless) {
+    bool fg_standalone = false;
+    if (!headless && extras::ffx_fg_wanted()) {
         uint32_t nfam = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(physical_, &nfam, nullptr);
         std::vector<VkQueueFamilyProperties> fams(nfam);
         vkGetPhysicalDeviceQueueFamilyProperties(physical_, &nfam, fams.data());
-        if (queue_family_ < nfam) fg_queues = extras::ffx_fg_extra_queues(fams[queue_family_].queueCount);
+        const uint32_t have = queue_family_ < nfam ? fams[queue_family_].queueCount : 0u;
+        if (extras::ffx_fg_standalone_wanted(have)) fg_standalone = true;
+        else fg_queues = 3;
     }
     const float prio[4] = {1.0f, 1.0f, 1.0f, 1.0f};
     VkDeviceQueueCreateInfo qci = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
@@ -986,7 +991,8 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
         }
     }
     vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
-    if (fg_queues) extras::ffx_fg_install(*this, fg_queues);
+    if (fg_standalone) extras::ffx_fg_install_standalone(*this);
+    else if (fg_queues) extras::ffx_fg_install(*this);
 
     uint32_t nq = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(physical_, &nq, nullptr);

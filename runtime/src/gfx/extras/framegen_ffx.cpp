@@ -9,8 +9,10 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <condition_variable>
 #include <cstdlib>
 #include <mutex>
+#include <thread>
 #include <vector>
 #include <string>
 
@@ -48,6 +50,17 @@ struct Ffx {
     PFN_vkSetHdrMetadataEXT orig_hdr = nullptr;
 
     bool failed = false;
+    bool standalone = false, standalone_gen = false;   // the experiment (framegen_ffx.h)
+    gfx::Image gen;                       // the generated frame of the experiment
+    uint64_t gen_total = 0;               // interpolations done
+    VkSemaphore g_main = VK_NULL_HANDLE, g_acq = VK_NULL_HANDLE;   // main submission -> copy of the generated frame; acquire of its image
+    VkFence g_fence = VK_NULL_HANDLE;
+    VkCommandPool g_pool = VK_NULL_HANDLE;
+    VkCommandBuffer g_cmd = VK_NULL_HANDLE;
+    std::chrono::steady_clock::time_point last_gen = {};
+    double interval_ms = 0;               // smoothed time between generated frames
+    std::chrono::steady_clock::time_point due = {};   // when the real frame after the generated one goes out
+    int32_t rect[4] = {};
     ffxContext sc_ctx = nullptr, fg_ctx = nullptr;
     ffxQueryDescSwapchainReplacementFunctionsVK fns = {};
     VkSwapchainKHR sc = VK_NULL_HANDLE, dead = VK_NULL_HANDLE;
@@ -505,17 +518,8 @@ bool ffx_fg_wanted() {
     return v;
 }
 
-uint32_t ffx_fg_extra_queues(uint32_t family_queue_count) {
-    if (!ffx_fg_wanted()) return 0;
-    if (family_queue_count < 4) {
-        NXLOG_W(kTag, "FSR 3 frame generation needs 4 queues in the graphics family, it has %u: off", family_queue_count);
-        return 0;
-    }
-    return 3;
-}
-
-void ffx_fg_install(gfx::Device& dev, uint32_t extra_queues) {
-    if (extra_queues < 3 || !load()) return;
+void ffx_fg_install(gfx::Device& dev) {
+    if (!load()) return;
     Ffx& f = g();
     f.dev = &dev;
     f.installed = std::chrono::steady_clock::now();
@@ -543,7 +547,8 @@ void ffx_fg_install(gfx::Device& dev, uint32_t extra_queues) {
 
 bool ffx_fg_frame(VkCommandBuffer cb, const FfxFgFrame& fr) {
     Ffx& f = g();
-    if (!f.sc_ctx) return false;
+    if (!f.sc_ctx && !f.standalone) return false;
+    std::copy(fr.rect, fr.rect + 4, f.rect);
     const bool gen = fr.enable && fr.inputs && fr.depth && fr.motion && ensure_fg_context(fr);
     if (!f.fg_ctx) {
         ++f.frame_id;
@@ -552,14 +557,15 @@ bool ffx_fg_frame(VkCommandBuffer cb, const FfxFgFrame& fr) {
     ffxConfigureDescFrameGeneration c = {};
     c.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
     c.swapChain = reinterpret_cast<void*>(f.sc);
-    c.frameGenerationCallback = &fg_dispatch;
+    c.frameGenerationCallback = f.standalone ? nullptr : &fg_dispatch;
     if (dumping()) c.presentCallback = &compose;
     c.frameGenerationCallbackUserContext = &f.fg_ctx;
     c.frameGenerationEnabled = gen;
+    f.standalone_gen = f.standalone && gen;
     c.allowAsyncWorkloads = false;
     if (gen && fr.hudless)
         c.HUDLessColor = res(fr.hudless, ffxApiGetSurfaceFormatVK(f.format), fr.bb, FFX_API_RESOURCE_USAGE_READ_ONLY | FFX_API_RESOURCE_USAGE_RENDERTARGET);
-    c.flags = 0;
+    c.flags = f.standalone ? FFX_FRAMEGENERATION_FLAG_NO_SWAPCHAIN_CONTEXT_NOTIFY : 0u;
     c.onlyPresentGenerated = false;
     c.generationRect = {fr.rect[0], fr.rect[1], fr.rect[2], fr.rect[3]};
     c.frameID = f.frame_id;
@@ -568,6 +574,7 @@ bool ffx_fg_frame(VkCommandBuffer cb, const FfxFgFrame& fr) {
     if (r != FFX_API_RETURN_OK && !f.logged) {
         f.logged = true;
         NXLOG_E(kTag, "FSR 3 frame generation: configure failed (%u)", r);
+        if (f.standalone) f.standalone_gen = false;
     }
     if (gen) {
         ffxDispatchDescFrameGenerationPrepareCameraInfo cam = {};
@@ -606,6 +613,247 @@ bool ffx_fg_frame(VkCommandBuffer cb, const FfxFgFrame& fr) {
     return true;
 }
 
+bool ffx_fg_standalone_wanted(uint32_t graphics_queues) {
+    static int v = -1;   // decided when the device is made, then kept
+    if (v < 0 && graphics_queues) {
+        const bool forced = config_get_bool("dlss", "frame_gen_standalone", false);
+        v = forced || graphics_queues < 4;
+        if (graphics_queues < 4 && !forced)
+            NXLOG_I(kTag, "FSR 3 frame generation: the graphics family has %u queue(s), FFX's swapchain needs 4: interpolation only (standalone)", graphics_queues);
+    }
+    return v > 0 || (v < 0 && config_get_bool("dlss", "frame_gen_standalone", false));
+}
+
+void ffx_fg_install_standalone(gfx::Device& dev) {
+    if (!load()) return;
+    Ffx& f = g();
+    f.dev = &dev;
+    f.standalone = true;
+    f.installed = std::chrono::steady_clock::now();
+    NXLOG_I(kTag, "FSR 3 frame generation (standalone): amd_fidelityfx_vk.dll loaded, interpolation only: no FFX swapchain, no extra queues");
+}
+
+void ffx_fg_standalone_format(VkFormat format) {
+    Ffx& f = g();
+    if (f.standalone) f.format = format;
+}
+
+bool ffx_fg_standalone_generate(VkCommandBuffer cb, VkImage color, VkExtent2D ext) {
+    Ffx& f = g();
+    if (!f.standalone || !f.standalone_gen || !f.fg_ctx || f.format == VK_FORMAT_UNDEFINED) return false;
+    bool fresh = false;
+    if (!f.gen || f.gen.extent.width != ext.width || f.gen.extent.height != ext.height || f.gen.format != f.format) {
+        if (f.gen) f.dev->destroy_image(f.gen);
+        gfx::ImageDesc d;
+        d.format = f.format;
+        d.width = ext.width;
+        d.height = ext.height;
+        d.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        d.create_view = false;
+        d.name = "ffx generated frame";
+        if (f.dev->create_image(d, &f.gen) != VK_SUCCESS) {
+            NXLOG_E(kTag, "FSR 3 frame generation (standalone): the generated frame image was not made");
+            f.standalone_gen = false;
+            return false;
+        }
+        fresh = true;
+    }
+    img_barrier(cb, color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+    img_barrier(cb, f.gen.image, fresh ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+    const uint32_t fmt = ffxApiGetSurfaceFormatVK(f.format);
+    ffxDispatchDescFrameGeneration d = {};
+    d.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION;
+    d.commandList = cb;
+    d.presentColor = res(color, fmt, ext, FFX_API_RESOURCE_USAGE_READ_ONLY | FFX_API_RESOURCE_USAGE_RENDERTARGET);
+    d.outputs[0] = res(f.gen.image, fmt, ext, FFX_API_RESOURCE_USAGE_UAV);
+    d.numGeneratedFrames = 1;
+    d.reset = f.reset_pending.exchange(false);
+    d.backbufferTransferFunction = f.format == VK_FORMAT_R16G16B16A16_SFLOAT ? FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SCRGB : FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SRGB;
+    d.minMaxLuminance[1] = 80.0f;
+    d.generationRect = {f.rect[0], f.rect[1], f.rect[2], f.rect[3]};
+    d.frameID = f.frame_id - 1;
+    step("standalone interpolation dispatch");
+    const ffxReturnCode_t r = f.dispatch(&f.fg_ctx, &d.header);
+    step("standalone interpolation dispatch done");
+    img_barrier(cb, color, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    static uint64_t n = 0;
+    if (r != FFX_API_RETURN_OK ? (n % 300 == 0) : (n % 600 == 0))
+        NXLOG_I(kTag, "FSR 3 frame generation (standalone): interpolation dispatch %llu returned %u", static_cast<unsigned long long>(n), r);
+    ++n;
+    if (r != FFX_API_RETURN_OK) return false;
+    ++f.gen_total;
+    return true;
+}
+
+VkSemaphore ffx_fg_standalone_main_semaphore() {
+    Ffx& f = g();
+    if (!f.g_main) {
+        VkSemaphoreCreateInfo ci = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+        vkCreateSemaphore(f.dev->device(), &ci, nullptr, &f.g_main);
+        vkCreateSemaphore(f.dev->device(), &ci, nullptr, &f.g_acq);
+        VkFenceCreateInfo fi = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, nullptr, VK_FENCE_CREATE_SIGNALED_BIT};
+        vkCreateFence(f.dev->device(), &fi, nullptr, &f.g_fence);
+        VkCommandPoolCreateInfo pi = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, nullptr, VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, f.dev->queue_family()};
+        vkCreateCommandPool(f.dev->device(), &pi, nullptr, &f.g_pool);
+        VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, nullptr, f.g_pool, VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1};
+        vkAllocateCommandBuffers(f.dev->device(), &ai, &f.g_cmd);
+    }
+    return f.g_main;
+}
+
+namespace {
+void precise_wait_until(std::chrono::steady_clock::time_point t) {
+    for (;;) {
+        const auto left = t - std::chrono::steady_clock::now();
+        if (left <= std::chrono::steady_clock::duration::zero()) return;
+        if (left > std::chrono::milliseconds(2)) Sleep(1);
+        else YieldProcessor();
+    }
+}
+}  // namespace
+
+// The generated frame goes out first: it is copied into a second swapchain image and presented, half a frame later the real one follows
+// (the renderer's own present). The main submission signalled g_main when the interpolation was done.
+bool ffx_fg_standalone_present_generated(VkSwapchainKHR sc, const VkImage* imgs, const VkSemaphore* dones, uint32_t n, VkExtent2D ext, std::mutex& qm, VkQueue q) {
+    Ffx& f = g();
+    VkDevice dev = f.dev->device();
+    auto drain_main = [&] {   // g_main was signalled and nothing waits for it: an empty submission takes it
+        VkSemaphoreSubmitInfo w = {VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, nullptr, f.g_main, 0, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0};
+        VkSubmitInfo2 si = {VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+        si.waitSemaphoreInfoCount = 1;
+        si.pWaitSemaphoreInfos = &w;
+        vkQueueSubmit2(q, 1, &si, VK_NULL_HANDLE);
+    };
+    if (!f.gen || f.gen.extent.width != ext.width || f.gen.extent.height != ext.height) return drain_main(), false;
+    vkWaitForFences(dev, 1, &f.g_fence, VK_TRUE, 1000000000ull);
+    uint32_t i = 0;
+    const VkResult ar = vkAcquireNextImageKHR(dev, sc, 50000000ull, f.g_acq, VK_NULL_HANDLE, &i);
+    if ((ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) || i >= n) return drain_main(), false;
+    vkResetFences(dev, 1, &f.g_fence);
+    vkResetCommandBuffer(f.g_cmd, 0);
+    VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, nullptr, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+    vkBeginCommandBuffer(f.g_cmd, &bi);
+    img_barrier(f.g_cmd, imgs[i], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    img_barrier(f.g_cmd, f.gen.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    VkImageCopy c = {};
+    c.srcSubresource = c.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    c.extent = {ext.width, ext.height, 1};
+    vkCmdCopyImage(f.g_cmd, f.gen.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, imgs[i], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+    img_barrier(f.g_cmd, imgs[i], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    img_barrier(f.g_cmd, f.gen.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+    vkEndCommandBuffer(f.g_cmd);
+    VkSemaphoreSubmitInfo waits[2] = {{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, nullptr, f.g_main, 0, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0},
+                                      {VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, nullptr, f.g_acq, 0, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0}};
+    VkSemaphoreSubmitInfo sig = {VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, nullptr, dones[i], 0, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0};
+    VkCommandBufferSubmitInfo cbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, nullptr, f.g_cmd, 0};
+    VkSubmitInfo2 si = {VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+    si.waitSemaphoreInfoCount = 2;
+    si.pWaitSemaphoreInfos = waits;
+    si.commandBufferInfoCount = 1;
+    si.pCommandBufferInfos = &cbi;
+    si.signalSemaphoreInfoCount = 1;
+    si.pSignalSemaphoreInfos = &sig;
+    VkPresentInfoKHR pi = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+    pi.waitSemaphoreCount = 1;
+    pi.pWaitSemaphores = &dones[i];
+    pi.swapchainCount = 1;
+    pi.pSwapchains = &sc;
+    pi.pImageIndices = &i;
+    if (vkQueueSubmit2(q, 1, &si, f.g_fence) != VK_SUCCESS) return false;
+    vkQueuePresentKHR(q, &pi);
+    // half a frame until the real one: the game's own frame time (smoothed)
+    const auto now = std::chrono::steady_clock::now();
+    if (f.last_gen.time_since_epoch().count()) {
+        const double dt = std::clamp(std::chrono::duration<double, std::milli>(now - f.last_gen).count(), 4.0, 100.0);
+        f.interval_ms = f.interval_ms > 0 ? f.interval_ms * 0.9 + dt * 0.1 : dt;
+    }
+    f.last_gen = now;
+    f.due = now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double, std::milli>(f.interval_ms > 0 ? f.interval_ms * 0.5 : 0.0));
+    return true;
+}
+
+namespace {
+// The real frame's present, half a frame after the generated one, from a thread of its own: the render thread does not wait for it.
+struct Deferred {
+    std::mutex mu;
+    std::condition_variable cv;
+    bool started = false, pending = false;
+    VkSwapchainKHR sc = VK_NULL_HANDLE;
+    VkSemaphore wait = VK_NULL_HANDLE;
+    uint32_t index = 0;
+    VkQueue q = nullptr;
+    std::mutex* qm = nullptr;
+    std::chrono::steady_clock::time_point due = {};
+    std::atomic<int> result{VK_SUCCESS};
+};
+Deferred& dfr() {
+    static Deferred* d = new Deferred;   // never destroyed: the thread outlives the static destructors
+    return *d;
+}
+void dfr_thread() {
+    Deferred& d = dfr();
+    std::unique_lock<std::mutex> lk(d.mu);
+    for (;;) {
+        d.cv.wait(lk, [&] { return d.pending; });
+        const auto due = d.due;
+        lk.unlock();
+        precise_wait_until(due);
+        VkPresentInfoKHR pi = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+        pi.waitSemaphoreCount = 1;
+        pi.pWaitSemaphores = &d.wait;
+        pi.swapchainCount = 1;
+        pi.pSwapchains = &d.sc;
+        pi.pImageIndices = &d.index;
+        VkResult r;
+        {
+            std::lock_guard<std::mutex> ql(*d.qm);
+            r = vkQueuePresentKHR(d.q, &pi);
+        }
+        if (r != VK_SUCCESS) d.result.store(r);
+        lk.lock();
+        d.pending = false;
+        d.cv.notify_all();
+    }
+}
+}  // namespace
+
+bool ffx_fg_standalone_defer_present(VkSwapchainKHR sc, VkSemaphore wait, uint32_t index, VkQueue q, std::mutex& qm) {
+    Ffx& f = g();
+    Deferred& d = dfr();
+    std::unique_lock<std::mutex> lk(d.mu);
+    if (d.pending) return false;   // the last one is not out yet: this one goes straight (the caller)
+    if (!d.started) {
+        d.started = true;
+        std::thread(dfr_thread).detach();
+    }
+    d.sc = sc;
+    d.wait = wait;
+    d.index = index;
+    d.q = q;
+    d.qm = &qm;
+    d.due = f.due;
+    d.pending = true;
+    d.cv.notify_all();
+    return true;
+}
+
+void ffx_fg_standalone_wait_due(std::mutex& qm) {   // caller holds qm
+    Ffx& f = g();
+    qm.unlock();
+    precise_wait_until(f.due);
+    qm.lock();
+}
+
+int ffx_fg_standalone_take_result() {
+    return dfr().result.exchange(VK_SUCCESS);
+}
+
+void ffx_fg_standalone_flush() {
+    Deferred& d = dfr();
+    std::unique_lock<std::mutex> lk(d.mu);
+    d.cv.wait(lk, [&] { return !d.pending; });
+}
+
 bool ffx_fg_owns_swapchain() {
     Ffx& f = g();
     return f.sc_ctx && f.sc && !f.failed;
@@ -613,6 +861,7 @@ bool ffx_fg_owns_swapchain() {
 
 uint64_t ffx_fg_present_count() {
     Ffx& f = g();
+    if (f.standalone) return f.gen_total * 2;   // no FFX swapchain: each interpolation is two presents (generated, real)
     return f.sc_ctx && f.fns.pOutGetLastPresentCountFFXAPI ? f.fns.pOutGetLastPresentCountFFXAPI(f.sc) : 0;
 }
 

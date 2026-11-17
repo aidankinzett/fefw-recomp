@@ -525,6 +525,12 @@ struct Renderer::Impl {
         VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         capture_supported = (caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
         if (capture_supported) usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        // frame generation without FFX's swapchain (framegen_ffx.h, experiment): FFX reads the backbuffer, the result may be copied into it
+        if (extras::ffx_fg_standalone_wanted() && extras::ffx_fg_wanted()) {
+            const VkImageUsageFlags more = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+            if ((caps.supportedUsageFlags & more) == more) usage |= more;
+            else NXLOG_W(kTag, "swapchain usage 0x%x lacks sampled/storage/transfer-dst: frame generation experiment unusable", caps.supportedUsageFlags);
+        }
         {   // the swapchain format goes through the same check as every image
             ImageDesc id;
             id.format = chosen.format;
@@ -543,7 +549,8 @@ struct Renderer::Impl {
         }
         if (ext.width == 0 || ext.height == 0) { extent = {0, 0}; return false; }
 
-        uint32_t images = std::max(caps.minImageCount + (active == PresentMode::Mailbox ? 1u : 0u), desc.frames_in_flight + 1);
+        const bool two_per_frame = extras::ffx_fg_wanted() && extras::ffx_fg_standalone_wanted();   // the generated frame takes an image of its own
+        uint32_t images = std::max(caps.minImageCount + (active == PresentMode::Mailbox ? 1u : 0u), desc.frames_in_flight + 1) + (two_per_frame ? 2u : 0u);
         if (caps.maxImageCount) images = std::min(images, caps.maxImageCount);
 
         VkSwapchainKHR old = swapchain;
@@ -572,6 +579,7 @@ struct Renderer::Impl {
         }
 #endif
         extras::framegen_swapchain_reset();
+        extras::ffx_fg_standalone_flush();
         VkSwapchainKHR fresh = VK_NULL_HANDLE;
         VkResult r = vkCreateSwapchainKHR(vk(), &ci, nullptr, &fresh);
         if (r == VK_SUCCESS) vk_gauge_swapchains().add(1);
@@ -709,6 +717,7 @@ struct Renderer::Impl {
                 if (s.cmd) vk_gauge_command_buffers().sub(1);
             }
         }
+        extras::ffx_fg_standalone_flush();
         slots.clear();
         destroy_targets();
         extras::framegen_swapchain_reset();
@@ -844,6 +853,7 @@ bool Renderer::begin_frame(FrameInfo* out) {
     }
     Impl::Target& t = s.targets[idx];
     barrier(slot.cmd, t.image, kUndefined, kColorAtt);
+    extras::ffx_fg_standalone_format(s.format);
 
     s.cur_image = idx;
     s.info = FrameInfo{slot.cmd, t.image, t.view, s.format, s.extent, s.cur_slot, idx, s.frame_number, s.kind != extras::OutputKind::Sdr8};
@@ -859,6 +869,14 @@ void Renderer::end_frame(SubmitPrefix* prefix) {
     Impl::Slot& slot = s.slots[s.cur_slot];
     Impl::Target& t = s.targets[s.cur_image];
     if (s.overlay) s.overlay(s.info);
+    {   // a present of the generated-frame thread that found the swapchain out of date
+        const int dr = extras::ffx_fg_standalone_take_result();
+        if (dr == VK_ERROR_OUT_OF_DATE_KHR || dr == VK_SUBOPTIMAL_KHR || dr == VK_ERROR_SURFACE_LOST_KHR) {
+            s.dirty = true;
+            s.st.out_of_date++;
+        }
+    }
+    const bool generated = !s.headless && extras::ffx_fg_standalone_generate(slot.cmd, t.image, s.extent);
 
     const bool capturing = s.cap_pending.load(std::memory_order_acquire) && (s.headless || s.capture_supported);
     Buffer cap;
@@ -913,11 +931,17 @@ void Renderer::end_frame(SubmitPrefix* prefix) {
     VkSubmitInfo2 si = {VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
     si.commandBufferInfoCount = static_cast<uint32_t>(cbs.size());
     si.pCommandBufferInfos = cbs.data();
-    VkSemaphoreSubmitInfo signals[3] = {};
+    VkSemaphoreSubmitInfo signals[4] = {};
     if (!s.headless) {
         si.waitSemaphoreInfoCount = 1;
         si.pWaitSemaphoreInfos = &wait;
         signals[si.signalSemaphoreInfoCount++] = signal;
+    }
+    if (generated) {
+        VkSemaphoreSubmitInfo& gs = signals[si.signalSemaphoreInfoCount++];
+        gs = {VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
+        gs.semaphore = extras::ffx_fg_standalone_main_semaphore();
+        gs.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
     }
     if (prefix && prefix->timeline) {
         VkSemaphoreSubmitInfo& tl = signals[si.signalSemaphoreInfoCount++];
@@ -987,7 +1011,21 @@ void Renderer::end_frame(SubmitPrefix* prefix) {
                 pid.pPresentIds = &present_id;
                 pi.pNext = &pid;
             }
-            r = vkQueuePresentKHR(s.dev->queue(), &pi);
+            bool deferred = false;
+            if (generated && !s.targets.empty()) {
+                std::vector<VkImage> imgs;
+                std::vector<VkSemaphore> dones;
+                for (const Impl::Target& tg : s.targets) {
+                    imgs.push_back(tg.image);
+                    dones.push_back(tg.render_done);
+                }
+                if (extras::ffx_fg_standalone_present_generated(s.swapchain, imgs.data(), dones.data(), static_cast<uint32_t>(imgs.size()), s.extent,
+                                                                s.dev->queue_mutex(), s.dev->queue())) {
+                    if (!present_id) deferred = extras::ffx_fg_standalone_defer_present(s.swapchain, t.render_done, s.cur_image, s.dev->queue(), s.dev->queue_mutex());
+                    if (!deferred) extras::ffx_fg_standalone_wait_due(s.dev->queue_mutex());
+                }
+            }
+            r = deferred ? VK_SUCCESS : vkQueuePresentKHR(s.dev->queue(), &pi);
             s.st.presents++;
             if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR || r == VK_ERROR_SURFACE_LOST_KHR) {
                 s.dirty = true;

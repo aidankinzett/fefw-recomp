@@ -6,6 +6,7 @@
 #include <volk.h>
 
 #include <cstdint>
+#include <mutex>
 
 namespace nxrt::gfx {
 class Device;
@@ -15,10 +16,29 @@ namespace nxrt::extras {
 
 bool ffx_fg_wanted();   // [dlss] frame_gen = fsr3 and amd_fidelityfx_vk.dll found (read once)
 bool ffx_fg_files();    // amd_fidelityfx_vk.dll found (ffx_files.h), whatever [dlss] frame_gen says
-// Device creation (vk_device.cpp): the queues to add to the graphics family (present, image acquire, async compute; 0 = none), then the
-// install once the device and its first queue exist (before any swapchain).
-uint32_t ffx_fg_extra_queues(uint32_t family_queue_count);
-void ffx_fg_install(gfx::Device& dev, uint32_t extra_queues);
+// Device creation (vk_device.cpp): once the device and its first queue exist (before any swapchain), install with the three queues
+// (present, image acquire, async compute) that follow the game's in its family.
+void ffx_fg_install(gfx::Device& dev);
+// Standalone mode ([dlss] frame_gen_standalone = 1, or automatic below four queues in the game's family): FFX's interpolation without its
+// swapchain. At the end of the frame (backbuffer drawn, colour attachment layout) the renderer calls _generate, which records the dispatch;
+// true: a generated frame is made, the submission must signal _main_semaphore and _present follows (before the real frame's present).
+// graphics_queues: the queues in the game's family (0: not known yet; the answer then is only the setting). Standalone when the setting
+// says so or the family has fewer than the four the FFX swapchain needs (the first answer is kept).
+bool ffx_fg_standalone_wanted(uint32_t graphics_queues = 0);
+void ffx_fg_install_standalone(gfx::Device& dev);
+void ffx_fg_standalone_format(VkFormat format);
+bool ffx_fg_standalone_generate(VkCommandBuffer cb, VkImage color, VkExtent2D extent);
+VkSemaphore ffx_fg_standalone_main_semaphore();
+// Copies the generated frame into another swapchain image and presents it (imgs / dones: the swapchain's images and their render-done
+// semaphores); the caller holds the queue lock qm. True: it went out, and the real frame's present follows half a frame later:
+//   _defer_present hands that present to a thread of its own (false: one is still pending, or not possible: then _wait_due, which lets go of
+//   qm while it waits, and the caller presents itself). _take_result: a non-success result of the thread's presents since the last call.
+//   _flush: before the swapchain is destroyed.
+bool ffx_fg_standalone_present_generated(VkSwapchainKHR sc, const VkImage* imgs, const VkSemaphore* dones, uint32_t n, VkExtent2D ext, std::mutex& qm, VkQueue q);
+bool ffx_fg_standalone_defer_present(VkSwapchainKHR sc, VkSemaphore wait, uint32_t index, VkQueue q, std::mutex& qm);
+void ffx_fg_standalone_wait_due(std::mutex& qm);
+int ffx_fg_standalone_take_result();
+void ffx_fg_standalone_flush();
 
 struct FfxFgFrame {
     VkImage depth = VK_NULL_HANDLE, motion = VK_NULL_HANDLE;   // render size, GENERAL, oriented as the backbuffer (framegen.cpp)
