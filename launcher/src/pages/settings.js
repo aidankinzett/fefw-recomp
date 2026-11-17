@@ -300,9 +300,10 @@ export async function render(el, ctx) {
     }
     cfg.lang = code;
     // Keep the in-game F1 menu in step: it reads [gfx] ui_language from fefw.ini.
-    // zh maps to the zh pack; any other launcher language falls back to English there.
+    // A language with a shipped F1 table (locales\<code>.ini) maps to it; any other falls back to English there.
+    const menuTables = ['zh', 'ru'];
     try {
-      await api('write_settings', { edits: [{ file: 'game', section: 'gfx', key: 'ui_language', value: code === 'zh' ? 'zh' : 'auto' }] });
+      await api('write_settings', { edits: [{ file: 'game', section: 'gfx', key: 'ui_language', value: menuTables.includes(code) ? code : 'auto' }] });
     } catch (e) { /* fefw.ini may not exist yet; the menu keeps its current language */ }
     await setLang(code, () => {
       for (const id of Object.keys(keep)) model[id] = keep[id];

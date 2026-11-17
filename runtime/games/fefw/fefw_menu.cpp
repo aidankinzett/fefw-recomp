@@ -1438,9 +1438,10 @@ void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
         ImGui::TextColored(kAccent, tr("Fire Emblem: Fortune's Weave"));
         ImGui::SameLine();
         ImGui::TextDisabled(tr(" settings"));
-        const char* hint = "L / R tabs   A select   B close";
+        // measured translated: a table's longer text would otherwise run past the window's right edge
+        const char* hint = tr("L / R tabs   A select   B close");
         ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - ImGui::CalcTextSize(hint).x);
-        ImGui::TextDisabled("%s", tr(hint));
+        ImGui::TextDisabled("%s", hint);
 
         m.help.clear();
         const float help_h = ImGui::GetTextLineHeightWithSpacing() * 2.2f;

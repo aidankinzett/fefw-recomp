@@ -72,7 +72,10 @@ The project has two independent language systems; they do not share files:
 | File | `locales/<code>.ini` (next to `fefw_rt.dll`) | `locales/<code>.json` (next to `fefw-launcher.exe`) |
 | Format | `English string = translation` lines | JSON object with `code`, `name`, `strings` |
 | Selected by | `[gfx] ui_language` in `fefw.ini` | `lang` in `launcher.json` |
-| Shipped here | `zh.ini` | `template.json` (an empty starting point) |
+| Shipped here | `zh.ini`, `ru.ini` | `template.json` (an empty starting point) |
+
+The launcher has Chinese and Russian built in, and choosing one of them in its Settings also sets `[gfx] ui_language`
+to the matching table here.
 
 `zh.ini` and the launcher's JSON packs are separate features: this folder holds
 the in-game table, and the launcher's packs live in its own install folder. A
@@ -89,7 +92,8 @@ loads the first font it finds from:
 4. `C:\Windows\Fonts\simhei.ttf`, then `Deng.ttf`.
 
 Without one of these the menu renders boxes for CJK characters; English
-tables need no font setup.
+tables need no font setup. Cyrillic (`ru.ini`) uses the same list: Microsoft
+YaHei has the Cyrillic letters, so Windows needs no extra font for it either.
 
 ## Ship checklist for a new language
 

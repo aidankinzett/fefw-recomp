@@ -1,13 +1,14 @@
 import { invoke } from '@tauri-apps/api/core';
 import { en } from './locales/en.js';
 import { zh } from './locales/zh.js';
+import { ru } from './locales/ru.js';
 
 /*
  * Interface language.
  *
  * English is the source table: every key exists there and any key a translation
  * leaves out falls back to it, so an incomplete pack shows English instead of a
- * raw key. Chinese is built in as well.
+ * raw key. Chinese and Russian are built in as well.
  *
  * Third-party packs are plain JSON files in locales/ next to the launcher:
  *   { "code": "de", "name": "Deutsch", "strings": { "nav.play": "Spielen", ... } }
@@ -16,11 +17,11 @@ import { zh } from './locales/zh.js';
  * never change how the launcher works. A file that does not parse is skipped.
  */
 
-const BUILTIN = { en, zh };
+const BUILTIN = { en, zh, ru };
 
 let current = 'en';
 let table = en.strings;
-let langs = [{ code: 'en', name: en.name }, { code: 'zh', name: zh.name }];
+let langs = [{ code: 'en', name: en.name }, { code: 'zh', name: zh.name }, { code: 'ru', name: ru.name }];
 
 /** The active language code. */
 export const getLang = () => current;
