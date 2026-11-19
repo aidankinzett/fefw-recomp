@@ -4,6 +4,7 @@
 
 #include <algorithm>
 
+#include "nxrt/diag.h"
 #include "nxrt/log.h"
 #include "vk_gauges.h"
 
@@ -40,7 +41,7 @@ VkShaderModule make_module(VkDevice d, const uint32_t* code, size_t bytes) {
     mi.codeSize = bytes;
     mi.pCode = code;
     VkShaderModule m = VK_NULL_HANDLE;
-    if (vkCreateShaderModule(d, &mi, nullptr, &m) != VK_SUCCESS) return VK_NULL_HANDLE;
+    if (NXRT_VK(vkCreateShaderModule(d, &mi, nullptr, &m)) != VK_SUCCESS) return VK_NULL_HANDLE;
     vk_gauge_shader_modules().add(1);
     return m;
 }
@@ -62,14 +63,14 @@ bool OverlayComposite::init(gfx::Device& dev) {
     sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     sci.maxLod = 0.0f;
-    if (vkCreateSampler(d, &sci, nullptr, &linear_) != VK_SUCCESS) return fail("overlay sampler");
+    if (NXRT_VK(vkCreateSampler(d, &sci, nullptr, &linear_)) != VK_SUCCESS) return fail("overlay sampler");
     vk_gauge_samplers().add(1);
 
     VkDescriptorSetLayoutBinding binding = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
     VkDescriptorSetLayoutCreateInfo li = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     li.bindingCount = 1;
     li.pBindings = &binding;
-    if (vkCreateDescriptorSetLayout(d, &li, nullptr, &set_layout_) != VK_SUCCESS) return fail("overlay set layout");
+    if (NXRT_VK(vkCreateDescriptorSetLayout(d, &li, nullptr, &set_layout_)) != VK_SUCCESS) return fail("overlay set layout");
     vk_gauge_descriptor_set_layouts().add(1);
 
     VkPushConstantRange pcr = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(CompositePush)};
@@ -78,7 +79,7 @@ bool OverlayComposite::init(gfx::Device& dev) {
     pli.pSetLayouts = &set_layout_;
     pli.pushConstantRangeCount = 1;
     pli.pPushConstantRanges = &pcr;
-    if (vkCreatePipelineLayout(d, &pli, nullptr, &layout_) != VK_SUCCESS) return fail("overlay pipeline layout");
+    if (NXRT_VK(vkCreatePipelineLayout(d, &pli, nullptr, &layout_)) != VK_SUCCESS) return fail("overlay pipeline layout");
     vk_gauge_pipeline_layouts().add(1);
 
     const VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kSetRing};
@@ -86,7 +87,7 @@ bool OverlayComposite::init(gfx::Device& dev) {
     dpi.maxSets = kSetRing;
     dpi.poolSizeCount = 1;
     dpi.pPoolSizes = &ps;
-    if (vkCreateDescriptorPool(d, &dpi, nullptr, &pool_) != VK_SUCCESS) return fail("overlay descriptor pool");
+    if (NXRT_VK(vkCreateDescriptorPool(d, &dpi, nullptr, &pool_)) != VK_SUCCESS) return fail("overlay descriptor pool");
     vk_gauge_descriptor_pools().add(1);
     VkDescriptorSetLayout ls[kSetRing];
     for (auto& x : ls) x = set_layout_;
@@ -94,7 +95,7 @@ bool OverlayComposite::init(gfx::Device& dev) {
     ai.descriptorPool = pool_;
     ai.descriptorSetCount = kSetRing;
     ai.pSetLayouts = ls;
-    if (vkAllocateDescriptorSets(d, &ai, sets_) != VK_SUCCESS) return fail("overlay descriptor sets");
+    if (NXRT_VK(vkAllocateDescriptorSets(d, &ai, sets_)) != VK_SUCCESS) return fail("overlay descriptor sets");
     vk_gauge_descriptor_sets().add(kSetRing);   // shutdown subtracts them only while sets_[0] is set
 
     vs_ = make_module(d, kOutVert, sizeof kOutVert);
@@ -210,7 +211,7 @@ VkPipeline OverlayComposite::pipeline(VkFormat fmt) {
     gpi.pDynamicState = &ds;
     gpi.layout = layout_;
     VkPipeline p = VK_NULL_HANDLE;
-    if (vkCreateGraphicsPipelines(dev_->device(), VK_NULL_HANDLE, 1, &gpi, nullptr, &p) != VK_SUCCESS) {
+    if (NXRT_VK(vkCreateGraphicsPipelines(dev_->device(), VK_NULL_HANDLE, 1, &gpi, nullptr, &p)) != VK_SUCCESS) {
         NXLOG_E(kTag, "overlay composite pipeline for format %d failed", static_cast<int>(fmt));
         p = VK_NULL_HANDLE;
     }

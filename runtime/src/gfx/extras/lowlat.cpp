@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Low-latency modes (include/nxrt/lowlat.h): NVIDIA Reflex (VK_NV_low_latency2) and AMD Anti-Lag 2 (VK_AMD_anti_lag).
+#include "nxrt/diag.h"
 #include "nxrt/lowlat.h"
 #include "extras/temporal.h"
 #include "extras/framegen_ffx.h"
@@ -72,7 +73,7 @@ struct LowLatency::Impl {
             mi.lowLatencyMode = live_on ? VK_TRUE : VK_FALSE;
             mi.lowLatencyBoost = cfg.mode == LatencyMode::Boost ? VK_TRUE : VK_FALSE;
             mi.minimumIntervalUs = cap_fps > 0 ? static_cast<uint32_t>(1e6 / cap_fps) : 0;
-            const VkResult r = vkSetLatencySleepModeNV(dev->device(), swapchain, &mi);
+            const VkResult r = NXRT_VK(vkSetLatencySleepModeNV(dev->device(), swapchain, &mi));
             mode_set = r == VK_SUCCESS;
             if (!mode_set) NXLOG_W(kTag, "vkSetLatencySleepModeNV failed (%d)", static_cast<int>(r));
             else NXLOG_I(kTag, "Reflex sleep mode set: low latency %s, boost %s, interval %u us", live_on ? "on" : "off", mi.lowLatencyBoost ? "on" : "off", mi.minimumIntervalUs);
@@ -218,7 +219,7 @@ LowLatency::LowLatency(gfx::Device& dev) : impl_(new Impl) {
             VkSemaphoreTypeCreateInfo tci = {VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
             tci.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
             VkSemaphoreCreateInfo sci = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, &tci};
-            if (vkCreateSemaphore(dev.device(), &sci, nullptr, &s.sleep_sem) != VK_SUCCESS) {
+            if (NXRT_VK(vkCreateSemaphore(dev.device(), &sci, nullptr, &s.sleep_sem)) != VK_SUCCESS) {
                 NXLOG_W(kTag, "cannot create the Reflex sleep semaphore: off");
                 s.reflex = false;
                 enabled_ = false;
@@ -325,7 +326,7 @@ void LowLatency::sim_begin() {
             std::lock_guard<std::mutex> ql(s.dev->queue_mutex());     // returns at once; the wait below is what blocks
             if (s.swapchain && s.mode_set) {                          // read under the queue lock: the swapchain is destroyed under it
                 si.value = ++s.sleep_value;
-                sr = vkLatencySleepNV(s.dev->device(), s.swapchain, &si);
+                sr = NXRT_VK(vkLatencySleepNV(s.dev->device(), s.swapchain, &si));
             }
         }
         if (sr == VK_SUCCESS) {

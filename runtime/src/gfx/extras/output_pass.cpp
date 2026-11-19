@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 
+#include "nxrt/diag.h"
 #include "nxrt/log.h"
 #include "vk_gauges.h"
 
@@ -29,7 +30,7 @@ VkShaderModule make_module(VkDevice d, const uint32_t* code, size_t bytes) {
     mi.codeSize = bytes;
     mi.pCode = code;
     VkShaderModule m = VK_NULL_HANDLE;
-    if (vkCreateShaderModule(d, &mi, nullptr, &m) != VK_SUCCESS) return VK_NULL_HANDLE;
+    if (NXRT_VK(vkCreateShaderModule(d, &mi, nullptr, &m)) != VK_SUCCESS) return VK_NULL_HANDLE;
     vk_gauge_shader_modules().add(1);
     return m;
 }
@@ -51,10 +52,10 @@ bool OutputPass::init(gfx::Device& dev) {
     sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     sci.maxLod = 0.0f;
-    if (vkCreateSampler(d, &sci, nullptr, &linear_) != VK_SUCCESS) return fail("linear sampler");
+    if (NXRT_VK(vkCreateSampler(d, &sci, nullptr, &linear_)) != VK_SUCCESS) return fail("linear sampler");
     vk_gauge_samplers().add(1);
     sci.magFilter = sci.minFilter = VK_FILTER_NEAREST;
-    if (vkCreateSampler(d, &sci, nullptr, &nearest_) != VK_SUCCESS) return fail("nearest sampler");
+    if (NXRT_VK(vkCreateSampler(d, &sci, nullptr, &nearest_)) != VK_SUCCESS) return fail("nearest sampler");
     vk_gauge_samplers().add(1);
 
     auto set_layout = [&](std::initializer_list<VkDescriptorSetLayoutBinding> b, VkDescriptorSetLayout* out) {
@@ -62,7 +63,7 @@ bool OutputPass::init(gfx::Device& dev) {
         VkDescriptorSetLayoutCreateInfo li = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
         li.bindingCount = static_cast<uint32_t>(v.size());
         li.pBindings = v.data();
-        const bool ok = vkCreateDescriptorSetLayout(d, &li, nullptr, out) == VK_SUCCESS;
+        const bool ok = NXRT_VK(vkCreateDescriptorSetLayout(d, &li, nullptr, out)) == VK_SUCCESS;
         if (ok) vk_gauge_descriptor_set_layouts().add(1);
         return ok;
     };
@@ -73,7 +74,7 @@ bool OutputPass::init(gfx::Device& dev) {
         li.pSetLayouts = &sl;
         li.pushConstantRangeCount = 1;
         li.pPushConstantRanges = &pcr;
-        const bool ok = vkCreatePipelineLayout(d, &li, nullptr, out) == VK_SUCCESS;
+        const bool ok = NXRT_VK(vkCreatePipelineLayout(d, &li, nullptr, out)) == VK_SUCCESS;
         if (ok) vk_gauge_pipeline_layouts().add(1);
         return ok;
     };
@@ -85,7 +86,7 @@ bool OutputPass::init(gfx::Device& dev) {
     dpi.maxSets = kSetRing;
     dpi.poolSizeCount = 1;
     dpi.pPoolSizes = &ps;
-    if (vkCreateDescriptorPool(d, &dpi, nullptr, &pool_) != VK_SUCCESS) return fail("descriptor pool");
+    if (NXRT_VK(vkCreateDescriptorPool(d, &dpi, nullptr, &pool_)) != VK_SUCCESS) return fail("descriptor pool");
     vk_gauge_descriptor_pools().add(1);
     {
         VkDescriptorSetLayout ls[kSetRing];
@@ -94,7 +95,7 @@ bool OutputPass::init(gfx::Device& dev) {
         ai.descriptorPool = pool_;
         ai.descriptorSetCount = kSetRing;
         ai.pSetLayouts = ls;
-        if (vkAllocateDescriptorSets(d, &ai, enc_sets_) != VK_SUCCESS) return fail("descriptor sets");
+        if (NXRT_VK(vkAllocateDescriptorSets(d, &ai, enc_sets_)) != VK_SUCCESS) return fail("descriptor sets");
         vk_gauge_descriptor_sets().add(kSetRing);   // shutdown subtracts them only while enc_sets_[0] is set
     }
 
@@ -180,7 +181,7 @@ VkPipeline OutputPass::encode_pipeline(VkFormat fmt) {
     gpi.pDynamicState = &ds;
     gpi.layout = enc_layout_;
     VkPipeline p = VK_NULL_HANDLE;
-    if (vkCreateGraphicsPipelines(dev_->device(), VK_NULL_HANDLE, 1, &gpi, nullptr, &p) != VK_SUCCESS) {
+    if (NXRT_VK(vkCreateGraphicsPipelines(dev_->device(), VK_NULL_HANDLE, 1, &gpi, nullptr, &p)) != VK_SUCCESS) {
         NXLOG_E(kTag, "encode pipeline for format %d failed", static_cast<int>(fmt));
         p = VK_NULL_HANDLE;
     }

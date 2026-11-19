@@ -4,6 +4,7 @@
 
 #include <mutex>
 
+#include "nxrt/diag.h"
 #include "nxrt/gfx.h"
 #include "nxrt/log.h"
 
@@ -81,9 +82,9 @@ bool Taau::init() {
     sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     sci.maxLod = 0.0f;
-    if (vkCreateSampler(d, &sci, nullptr, &nearest_) != VK_SUCCESS) return false;
+    if (NXRT_VK(vkCreateSampler(d, &sci, nullptr, &nearest_)) != VK_SUCCESS) return false;
     sci.magFilter = sci.minFilter = VK_FILTER_LINEAR;
-    if (vkCreateSampler(d, &sci, nullptr, &linear_) != VK_SUCCESS) return false;
+    if (NXRT_VK(vkCreateSampler(d, &sci, nullptr, &linear_)) != VK_SUCCESS) return false;
 
     auto make_layout = [&](uint32_t samplers, uint32_t images, VkDescriptorSetLayout* out) {
         VkDescriptorSetLayoutBinding b[8] = {};
@@ -96,7 +97,7 @@ bool Taau::init() {
         VkDescriptorSetLayoutCreateInfo li = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
         li.bindingCount = samplers + images;
         li.pBindings = b;
-        return vkCreateDescriptorSetLayout(d, &li, nullptr, out) == VK_SUCCESS;
+        return NXRT_VK(vkCreateDescriptorSetLayout(d, &li, nullptr, out)) == VK_SUCCESS;
     };
     if (!make_layout(5, 1, &set_layout_) || !make_layout(3, 3, &prep_set_layout_)) return false;
 
@@ -107,16 +108,16 @@ bool Taau::init() {
         pli.pSetLayouts = &sl;
         pli.pushConstantRangeCount = 1;
         pli.pPushConstantRanges = &pcr;
-        if (vkCreatePipelineLayout(d, &pli, nullptr, pl) != VK_SUCCESS) return false;
+        if (NXRT_VK(vkCreatePipelineLayout(d, &pli, nullptr, pl)) != VK_SUCCESS) return false;
         VkShaderModuleCreateInfo mi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
         mi.codeSize = code_size;
         mi.pCode = code;
         VkShaderModule mod = VK_NULL_HANDLE;
-        if (vkCreateShaderModule(d, &mi, nullptr, &mod) != VK_SUCCESS) return false;
+        if (NXRT_VK(vkCreateShaderModule(d, &mi, nullptr, &mod)) != VK_SUCCESS) return false;
         VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
         ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", nullptr};
         ci.layout = *pl;
-        const VkResult r = vkCreateComputePipelines(d, VK_NULL_HANDLE, 1, &ci, nullptr, pipe);
+        const VkResult r = NXRT_VK(vkCreateComputePipelines(d, VK_NULL_HANDLE, 1, &ci, nullptr, pipe));
         vkDestroyShaderModule(d, mod, nullptr);
         return r == VK_SUCCESS;
     };

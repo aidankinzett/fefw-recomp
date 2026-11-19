@@ -199,6 +199,9 @@ std::string build_report(const EXCEPTION_RECORD* rec, const CONTEXT* cx, DWORD t
         out += mem::describe_page(addr);
         out += mem::ww::describe_page(addr);
     }
+    // Before the rest: when the GPU went away, the first Vulkan call that failed explains the crash, and every later failure in the
+    // log (and whatever call the faulting thread was in) follows from it.
+    out += diag_vk_failure_text();
 
     // Last guest function: the lifted function whose host code contains the faulting instruction.
     if (const uint64_t g = guest_function_of(rip))

@@ -25,6 +25,7 @@
 #include <bit>
 
 #include "nxrt/config.h"
+#include "nxrt/diag.h"
 #include "nxrt/frame_limiter.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/gauge.h"
@@ -327,7 +328,7 @@ bool occ_ready() {
     VkQueryPoolCreateInfo qi = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
     qi.queryType = VK_QUERY_TYPE_OCCLUSION;
     qi.queryCount = kOccSlots;
-    if (vkCreateQueryPool(vkdev(), &qi, nullptr, &g_occ_pool) != VK_SUCCESS) g_occ_pool = VK_NULL_HANDLE;
+    if (NXRT_VK(vkCreateQueryPool(vkdev(), &qi, nullptr, &g_occ_pool)) != VK_SUCCESS) g_occ_pool = VK_NULL_HANDLE;
     return g_occ_pool != VK_NULL_HANDLE;
 }
 
@@ -5040,7 +5041,7 @@ bool cw_ready(CounterWindow& w, bool xfb) {
     qi.queryType = xfb ? VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT : VK_QUERY_TYPE_PIPELINE_STATISTICS;
     qi.queryCount = kCounterSlots;
     if (!xfb) qi.pipelineStatistics = VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_PRIMITIVES_BIT;
-    if (vkCreateQueryPool(vkdev(), &qi, nullptr, &w.pool) != VK_SUCCESS) w.pool = VK_NULL_HANDLE;
+    if (NXRT_VK(vkCreateQueryPool(vkdev(), &qi, nullptr, &w.pool)) != VK_SUCCESS) w.pool = VK_NULL_HANDLE;
     return w.pool != VK_NULL_HANDLE;
 }
 

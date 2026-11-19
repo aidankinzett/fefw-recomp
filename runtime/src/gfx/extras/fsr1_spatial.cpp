@@ -6,6 +6,7 @@
 #include <cstring>
 #include <vector>
 
+#include "nxrt/diag.h"
 #include "nxrt/log.h"
 #include "extras/fsr1_consts.h"
 
@@ -47,7 +48,7 @@ VkShaderModule make_module(VkDevice d, const uint32_t* code, size_t bytes) {
     mi.codeSize = bytes;
     mi.pCode = code;
     VkShaderModule m = VK_NULL_HANDLE;
-    return vkCreateShaderModule(d, &mi, nullptr, &m) == VK_SUCCESS ? m : VK_NULL_HANDLE;
+    return NXRT_VK(vkCreateShaderModule(d, &mi, nullptr, &m)) == VK_SUCCESS ? m : VK_NULL_HANDLE;
 }
 }  // namespace
 
@@ -65,14 +66,14 @@ bool Fsr1Spatial::init(gfx::Device& dev) {
     sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     sci.maxLod = 0.0f;
-    if (vkCreateSampler(d, &sci, nullptr, &linear_) != VK_SUCCESS) return fail("sampler");
+    if (NXRT_VK(vkCreateSampler(d, &sci, nullptr, &linear_)) != VK_SUCCESS) return fail("sampler");
 
     auto set_layout = [&](VkDescriptorType first, VkDescriptorSetLayout* out) {
         const VkDescriptorSetLayoutBinding b[2] = {{0, first, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}};
         VkDescriptorSetLayoutCreateInfo li = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
         li.bindingCount = 2;
         li.pBindings = b;
-        return vkCreateDescriptorSetLayout(d, &li, nullptr, out) == VK_SUCCESS;
+        return NXRT_VK(vkCreateDescriptorSetLayout(d, &li, nullptr, out)) == VK_SUCCESS;
     };
     auto pipe_layout = [&](VkDescriptorSetLayout sl, uint32_t push, VkPipelineLayout* out) {
         VkPushConstantRange pcr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, push};
@@ -81,7 +82,7 @@ bool Fsr1Spatial::init(gfx::Device& dev) {
         li.pSetLayouts = &sl;
         li.pushConstantRangeCount = 1;
         li.pPushConstantRanges = &pcr;
-        return vkCreatePipelineLayout(d, &li, nullptr, out) == VK_SUCCESS;
+        return NXRT_VK(vkCreatePipelineLayout(d, &li, nullptr, out)) == VK_SUCCESS;
     };
     if (!set_layout(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &easu_set_layout_)) return fail("EASU set layout");
     if (!set_layout(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &rcas_set_layout_)) return fail("RCAS set layout");
@@ -93,7 +94,7 @@ bool Fsr1Spatial::init(gfx::Device& dev) {
     dpi.maxSets = 2 * kSetRing;
     dpi.poolSizeCount = 3;
     dpi.pPoolSizes = ps;
-    if (vkCreateDescriptorPool(d, &dpi, nullptr, &pool_) != VK_SUCCESS) return fail("descriptor pool");
+    if (NXRT_VK(vkCreateDescriptorPool(d, &dpi, nullptr, &pool_)) != VK_SUCCESS) return fail("descriptor pool");
     auto alloc = [&](VkDescriptorSetLayout l, VkDescriptorSet* out) {
         VkDescriptorSetLayout ls[kSetRing];
         for (auto& x : ls) x = l;
@@ -101,7 +102,7 @@ bool Fsr1Spatial::init(gfx::Device& dev) {
         ai.descriptorPool = pool_;
         ai.descriptorSetCount = kSetRing;
         ai.pSetLayouts = ls;
-        return vkAllocateDescriptorSets(d, &ai, out) == VK_SUCCESS;
+        return NXRT_VK(vkAllocateDescriptorSets(d, &ai, out)) == VK_SUCCESS;
     };
     if (!alloc(easu_set_layout_, easu_sets_) || !alloc(rcas_set_layout_, rcas_sets_)) return fail("descriptor sets");
 
@@ -111,7 +112,7 @@ bool Fsr1Spatial::init(gfx::Device& dev) {
         VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
         ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, m, "main", nullptr};
         ci.layout = l;
-        const VkResult r = vkCreateComputePipelines(d, VK_NULL_HANDLE, 1, &ci, nullptr, out);
+        const VkResult r = NXRT_VK(vkCreateComputePipelines(d, VK_NULL_HANDLE, 1, &ci, nullptr, out));
         vkDestroyShaderModule(d, m, nullptr);
         return r == VK_SUCCESS;
     };

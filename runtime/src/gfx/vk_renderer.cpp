@@ -76,6 +76,8 @@ const char* window_mode_name() {
                 : "  What to try: update the graphics driver; on a GPU that shares system memory (laptop, handheld) lower the render scale "
                   "or the texture quality. Please attach this file and fefw.log to an issue.\n";
     text += "\n";
+    text += diag_vk_failure_text();   // the call that really failed first, not the one that noticed the device was gone
+    text += "\n";
     text += diag_thread_dump();
     for (size_t pos = 0; pos < text.size();) {
         size_t eol = text.find('\n', pos);
@@ -291,7 +293,7 @@ struct Renderer::Impl {
         VkSemaphoreTypeCreateInfo tci = {VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
         tci.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
         VkSemaphoreCreateInfo ci = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, &tci};
-        if (vkCreateSemaphore(vk(), &ci, nullptr, &probe_sem) != VK_SUCCESS) { probe_sem = VK_NULL_HANDLE; return; }
+        if (NXRT_VK(vkCreateSemaphore(vk(), &ci, nullptr, &probe_sem)) != VK_SUCCESS) { probe_sem = VK_NULL_HANDLE; return; }
         vk_gauge_semaphores().add(1);
         probe_th = std::thread([this] {
             log_set_thread_name("lat-watch");
@@ -303,7 +305,7 @@ struct Renderer::Impl {
                 wi.semaphoreCount = 1;
                 wi.pSemaphores = &probe_sem;
                 wi.pValues = &v;
-                if (vkWaitSemaphores(vk(), &wi, 50ull * 1000 * 1000) != VK_SUCCESS) continue;
+                if (NXRT_VK(vkWaitSemaphores(vk(), &wi, 50ull * 1000 * 1000)) != VK_SUCCESS) continue;
                 const uint64_t t = ft::now_ns();
                 ft::event(z, t, t, static_cast<uint32_t>(probe_ids[v % 256]));
                 ++v;
@@ -446,7 +448,7 @@ struct Renderer::Impl {
 
     bool create_semaphore(VkSemaphore* s) {
         VkSemaphoreCreateInfo si = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
-        const bool ok = vkCreateSemaphore(vk(), &si, nullptr, s) == VK_SUCCESS;
+        const bool ok = NXRT_VK(vkCreateSemaphore(vk(), &si, nullptr, s)) == VK_SUCCESS;
         if (ok) vk_gauge_semaphores().add(1);
         return ok;
     }
@@ -493,7 +495,7 @@ struct Renderer::Impl {
         VkPhysicalDevice pd = dev->physical();
         VkSurfaceKHR surf = dev->surface();
         VkSurfaceCapabilitiesKHR caps;
-        if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(pd, surf, &caps) != VK_SUCCESS) return false;
+        if (NXRT_VK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(pd, surf, &caps)) != VK_SUCCESS) return false;
         uint32_t n = 0;
         vkGetPhysicalDeviceSurfacePresentModesKHR(pd, surf, &n, nullptr);
         supported_modes.assign(n, VK_PRESENT_MODE_FIFO_KHR);
@@ -575,7 +577,7 @@ struct Renderer::Impl {
 #endif
         extras::framegen_swapchain_reset();
         VkSwapchainKHR fresh = VK_NULL_HANDLE;
-        VkResult r = vkCreateSwapchainKHR(vk(), &ci, nullptr, &fresh);
+        VkResult r = NXRT_VK(vkCreateSwapchainKHR(vk(), &ci, nullptr, &fresh));
         if (r == VK_SUCCESS) vk_gauge_swapchains().add(1);
         destroy_targets();
         if (old) {   // under the queue lock: the Reflex calls (lowlat.cpp) read the handle under it, from other threads
@@ -606,7 +608,7 @@ struct Renderer::Impl {
             vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
             vi.format = format;
             vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-            if (vkCreateImageView(vk(), &vi, nullptr, &t.view) != VK_SUCCESS) return false;
+            if (NXRT_VK(vkCreateImageView(vk(), &vi, nullptr, &t.view)) != VK_SUCCESS) return false;
             vk_gauge_image_views().add(1);
             if (!create_semaphore(&t.render_done)) return false;
             targets.push_back(t);
@@ -636,7 +638,7 @@ struct Renderer::Impl {
         if (!s.ts_pending) return;
         s.ts_pending = false;
         uint64_t ts[2] = {};
-        if (vkGetQueryPoolResults(vk(), s.queries, 0, 2, sizeof ts, ts, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return;
+        if (NXRT_VK(vkGetQueryPoolResults(vk(), s.queries, 0, 2, sizeof ts, ts, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT)) != VK_SUCCESS) return;
         const uint32_t bits = 64;   // timestampValidBits is queried by the device; assume a full counter and mask below
         (void)bits;
         const double ms = static_cast<double>(ts[1] - ts[0]) * static_cast<double>(dev->timestamp_period_ns()) * 1e-6;
@@ -650,24 +652,24 @@ struct Renderer::Impl {
             Slot s;
             VkCommandPoolCreateInfo pi = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
             pi.queueFamilyIndex = dev->queue_family();
-            if (vkCreateCommandPool(vk(), &pi, nullptr, &s.pool) != VK_SUCCESS) return false;
+            if (NXRT_VK(vkCreateCommandPool(vk(), &pi, nullptr, &s.pool)) != VK_SUCCESS) return false;
             vk_gauge_command_pools().add(1);
             VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
             ai.commandPool = s.pool;
             ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
             ai.commandBufferCount = 1;
-            if (vkAllocateCommandBuffers(vk(), &ai, &s.cmd) != VK_SUCCESS) return false;
+            if (NXRT_VK(vkAllocateCommandBuffers(vk(), &ai, &s.cmd)) != VK_SUCCESS) return false;
             vk_gauge_command_buffers().add(1);
             VkFenceCreateInfo fi = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
             fi.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-            if (vkCreateFence(vk(), &fi, nullptr, &s.fence) != VK_SUCCESS) return false;
+            if (NXRT_VK(vkCreateFence(vk(), &fi, nullptr, &s.fence)) != VK_SUCCESS) return false;
             vk_gauge_fences().add(1);
             if (!create_semaphore(&s.acquire)) return false;
             if (dev->timestamps_supported()) {
                 VkQueryPoolCreateInfo qi = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
                 qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
                 qi.queryCount = 2;
-                if (vkCreateQueryPool(vk(), &qi, nullptr, &s.queries) != VK_SUCCESS) return false;
+                if (NXRT_VK(vkCreateQueryPool(vk(), &qi, nullptr, &s.queries)) != VK_SUCCESS) return false;
                 vk_gauge_query_pools().add(1);
             }
             slots.push_back(s);
@@ -683,7 +685,7 @@ struct Renderer::Impl {
         if (s.fence) { vkDestroyFence(vk(), s.fence, nullptr); vk_gauge_fences().sub(1); s.fence = VK_NULL_HANDLE; }
         VkFenceCreateInfo fi = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         fi.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-        if (vkCreateFence(vk(), &fi, nullptr, &s.fence) == VK_SUCCESS) vk_gauge_fences().add(1);
+        if (NXRT_VK(vkCreateFence(vk(), &fi, nullptr, &s.fence)) == VK_SUCCESS) vk_gauge_fences().add(1);
         else s.fence = VK_NULL_HANDLE;
         if (!create_semaphore(&s.acquire)) s.acquire = VK_NULL_HANDLE;
         s.ts_pending = false;
@@ -799,7 +801,7 @@ bool Renderer::begin_frame(FrameInfo* out) {
         }
     }
     {
-        const VkResult fr = vkWaitForFences(s.vk(), 1, &slot.fence, VK_TRUE, kFrameWaitNs);
+        const VkResult fr = NXRT_VK(vkWaitForFences(s.vk(), 1, &slot.fence, VK_TRUE, kFrameWaitNs));
         if (fr == VK_TIMEOUT) {
             s.stalled("the previous frame on this slot (GPU)");
             return false;
@@ -813,7 +815,7 @@ bool Renderer::begin_frame(FrameInfo* out) {
     if (s.headless) {
         idx = static_cast<uint32_t>(s.frame_number % s.targets.size());
     } else {
-        VkResult r = vkAcquireNextImageKHR(s.vk(), s.swapchain, kFrameWaitNs, slot.acquire, VK_NULL_HANDLE, &idx);
+        VkResult r = NXRT_VK(vkAcquireNextImageKHR(s.vk(), s.swapchain, kFrameWaitNs, slot.acquire, VK_NULL_HANDLE, &idx));
         if (r == VK_TIMEOUT || r == VK_NOT_READY) {
             s.stalled("a swapchain image");
             return false;
@@ -949,7 +951,7 @@ void Renderer::end_frame(SubmitPrefix* prefix) {
     bool present_ok = true;
     {
         std::lock_guard<std::mutex> lk(s.dev->queue_mutex());
-        VkResult r = vkQueueSubmit2(s.dev->queue(), 1, &si, slot.fence);
+        VkResult r = NXRT_VK(vkQueueSubmit2(s.dev->queue(), 1, &si, slot.fence));
         if (r != VK_SUCCESS) {
             NXLOG_E(kTag, "vkQueueSubmit2 failed (%d)", static_cast<int>(r));
             if (r == VK_ERROR_DEVICE_LOST) device_lost("vkQueueSubmit2 (present)", r, s.st.frames);
@@ -962,7 +964,7 @@ void Renderer::end_frame(SubmitPrefix* prefix) {
                 stand.signalSemaphoreInfoCount = 1;
                 stand.pSignalSemaphoreInfos = &signal;
             }
-            const VkResult r2 = vkQueueSubmit2(s.dev->queue(), 1, &stand, slot.fence);
+            const VkResult r2 = NXRT_VK(vkQueueSubmit2(s.dev->queue(), 1, &stand, slot.fence));
             if (r2 == VK_ERROR_DEVICE_LOST) device_lost("vkQueueSubmit2 (present stand-in)", r2, s.st.frames);
             if (r2 != VK_SUCCESS) {
                 NXLOG_E(kTag, "the stand-in submission failed too (%d): the frame is not presented, the slot's sync objects are made again",
@@ -989,7 +991,7 @@ void Renderer::end_frame(SubmitPrefix* prefix) {
                 pid.pPresentIds = &present_id;
                 pi.pNext = &pid;
             }
-            r = vkQueuePresentKHR(s.dev->queue(), &pi);
+            r = NXRT_VK(vkQueuePresentKHR(s.dev->queue(), &pi));
             if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) {
                 // A present that failed is not a frame on the display: counting every call as a present made a black window
                 // report 60 fps of presents while nothing reached the screen (presents_failed keeps the other results).

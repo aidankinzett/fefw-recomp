@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "nxrt/config.h"
+#include "nxrt/diag.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/gfx_tuning.h"
 #include "nxrt/gauge.h"
@@ -400,7 +401,7 @@ bool sparse_alloc(SparseState& sp, VkDeviceSize bytes, VkDeviceMemory* mem, VkDe
         ai.allocationSize = std::max<VkDeviceSize>(sp.chunk_size, bytes);
         ai.memoryTypeIndex = sp.mem_type;
         VkDeviceMemory m = VK_NULL_HANDLE;
-        if (vkAllocateMemory(vkdev(), &ai, nullptr, &m) != VK_SUCCESS) return false;
+        if (NXRT_VK(vkAllocateMemory(vkdev(), &ai, nullptr, &m)) != VK_SUCCESS) return false;
         sp.chunks.push_back(m);
         sp.chunk_used = 0;
     }
@@ -451,12 +452,12 @@ bool sparse_flush_binds(TexGpu& g) {
     if (!sp.opaque.empty()) { bi.imageOpaqueBindCount = 1; bi.pImageOpaqueBinds = &ob; }
     VkFenceCreateInfo fi = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     VkFence fence = VK_NULL_HANDLE;
-    if (vkCreateFence(vkdev(), &fi, nullptr, &fence) != VK_SUCCESS) return false;
+    if (NXRT_VK(vkCreateFence(vkdev(), &fi, nullptr, &fence)) != VK_SUCCESS) return false;
     if (on_render_thread()) submit_recorded();     // binds come after the submissions recorded before them, as without a batch
     VkResult r;
     {
         std::lock_guard<std::mutex> lk(device().queue_mutex());
-        r = vkQueueBindSparse(device().queue(), 1, &bi, fence);
+        r = NXRT_VK(vkQueueBindSparse(device().queue(), 1, &bi, fence));
     }
     if (r == VK_SUCCESS) r = vkWaitForFences(vkdev(), 1, &fence, VK_TRUE, UINT64_MAX);
     vkDestroyFence(vkdev(), fence, nullptr);
@@ -488,7 +489,7 @@ bool create_sparse_texture(Texture* t, TexGpu* g, const Shape& s, std::string* w
     ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkImage img = VK_NULL_HANDLE;
-    VkResult r = vkCreateImage(vkdev(), &ci, nullptr, &img);
+    VkResult r = NXRT_VK(vkCreateImage(vkdev(), &ci, nullptr, &img));
     if (r != VK_SUCCESS) { *why = "vkCreateImage " + std::to_string(r); return false; }
 
     VkMemoryRequirements mr;
@@ -1391,7 +1392,7 @@ VkImageView view_for(TexGpu& g, VkImageViewType type, uint32_t base_level, uint3
         }
     }
     VkImageView view = VK_NULL_HANDLE;
-    if (vkCreateImageView(vkdev(), &vi, nullptr, &view) != VK_SUCCESS) {
+    if (NXRT_VK(vkCreateImageView(vkdev(), &vi, nullptr, &view)) != VK_SUCCESS) {
         NXLOG_W(kTag, "vkCreateImageView failed for a view of format %d", static_cast<int>(fmt));
         return VK_NULL_HANDLE;
     }
@@ -1495,7 +1496,7 @@ bool make_dummy(Dummy& d, VkImageViewType type, bool depth, int component) {
     vi.viewType = type;
     vi.format = fmt;
     vi.subresourceRange = {asp, 0, 1, 0, layers};
-    if (vkCreateImageView(vkdev(), &vi, nullptr, &d.view) != VK_SUCCESS) {
+    if (NXRT_VK(vkCreateImageView(vkdev(), &vi, nullptr, &d.view)) != VK_SUCCESS) {
         d.view = VK_NULL_HANDLE;
         device().destroy_image(d.img);
         dummy_failed(d);
@@ -1615,7 +1616,7 @@ VkSampler create_sampler(const SamplerInfo& s) {
         ci.borderColor = standard_border(s);
     }
     VkSampler out = VK_NULL_HANDLE;
-    if (vkCreateSampler(vkdev(), &ci, nullptr, &out) != VK_SUCCESS) {
+    if (NXRT_VK(vkCreateSampler(vkdev(), &ci, nullptr, &out)) != VK_SUCCESS) {
         NXLOG_W(kTag, "vkCreateSampler failed: the dummy sampler is used");
         return VK_NULL_HANDLE;
     }
@@ -2373,23 +2374,23 @@ bool untiler_init() {
     VkDescriptorSetLayoutCreateInfo sli = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     sli.bindingCount = 2;
     sli.pBindings = b;
-    if (vkCreateDescriptorSetLayout(d, &sli, nullptr, &u.set_layout) != VK_SUCCESS) return false;
+    if (NXRT_VK(vkCreateDescriptorSetLayout(d, &sli, nullptr, &u.set_layout)) != VK_SUCCESS) return false;
     VkPushConstantRange pcr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(UntilePush)};
     VkPipelineLayoutCreateInfo pli = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pli.setLayoutCount = 1;
     pli.pSetLayouts = &u.set_layout;
     pli.pushConstantRangeCount = 1;
     pli.pPushConstantRanges = &pcr;
-    if (vkCreatePipelineLayout(d, &pli, nullptr, &u.layout) != VK_SUCCESS) return false;
+    if (NXRT_VK(vkCreatePipelineLayout(d, &pli, nullptr, &u.layout)) != VK_SUCCESS) return false;
     VkShaderModuleCreateInfo mi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     mi.codeSize = sizeof kUntileComp;
     mi.pCode = kUntileComp;
     VkShaderModule m = VK_NULL_HANDLE;
-    if (vkCreateShaderModule(d, &mi, nullptr, &m) != VK_SUCCESS) return false;
+    if (NXRT_VK(vkCreateShaderModule(d, &mi, nullptr, &m)) != VK_SUCCESS) return false;
     VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, m, "main", nullptr};
     ci.layout = u.layout;
-    const VkResult pr = vkCreateComputePipelines(d, VK_NULL_HANDLE, 1, &ci, nullptr, &u.pipe);
+    const VkResult pr = NXRT_VK(vkCreateComputePipelines(d, VK_NULL_HANDLE, 1, &ci, nullptr, &u.pipe));
     vkDestroyShaderModule(d, m, nullptr);
     if (pr != VK_SUCCESS) return false;
     const VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * Untiler::kRing};
@@ -2397,13 +2398,13 @@ bool untiler_init() {
     dpi.maxSets = Untiler::kRing;
     dpi.poolSizeCount = 1;
     dpi.pPoolSizes = &ps;
-    if (vkCreateDescriptorPool(d, &dpi, nullptr, &u.pool) != VK_SUCCESS) return false;
+    if (NXRT_VK(vkCreateDescriptorPool(d, &dpi, nullptr, &u.pool)) != VK_SUCCESS) return false;
     for (Untiler::Entry& e : u.ring) {
         VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         ai.descriptorPool = u.pool;
         ai.descriptorSetCount = 1;
         ai.pSetLayouts = &u.set_layout;
-        if (vkAllocateDescriptorSets(d, &ai, &e.set) != VK_SUCCESS) return false;
+        if (NXRT_VK(vkAllocateDescriptorSets(d, &ai, &e.set)) != VK_SUCCESS) return false;
     }
     u.ok = true;
     NXLOG_I(kTag, "GPU untile on ([nvn] gpu_untile)");
@@ -3087,7 +3088,7 @@ VkImageView dummy_storage_view(VkImageViewType type, VkFormat format) {
     vi.viewType = type;
     vi.format = format;
     vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, layers};
-    if (vkCreateImageView(vkdev(), &vi, nullptr, &d.view) != VK_SUCCESS) {
+    if (NXRT_VK(vkCreateImageView(vkdev(), &vi, nullptr, &d.view)) != VK_SUCCESS) {
         d.view = VK_NULL_HANDLE;
         device().destroy_image(d.img);
         dummy_failed(d);
@@ -3106,7 +3107,7 @@ VkSampler dummy_sampler() {
         ci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
         ci.addressModeU = ci.addressModeV = ci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         ci.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
-        if (vkCreateSampler(vkdev(), &ci, nullptr, &g_sh.dummy_sampler) != VK_SUCCESS) g_sh.dummy_sampler = VK_NULL_HANDLE;
+        if (NXRT_VK(vkCreateSampler(vkdev(), &ci, nullptr, &g_sh.dummy_sampler)) != VK_SUCCESS) g_sh.dummy_sampler = VK_NULL_HANDLE;
         else vk_gauge_samplers().add(1);
     }
     return g_sh.dummy_sampler;
@@ -3123,7 +3124,7 @@ VkSampler reserved_sampler() {
         ci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
         ci.addressModeU = ci.addressModeV = ci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         ci.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
-        if (vkCreateSampler(vkdev(), &ci, nullptr, &g_sh.reserved_sampler) != VK_SUCCESS) g_sh.reserved_sampler = VK_NULL_HANDLE;
+        if (NXRT_VK(vkCreateSampler(vkdev(), &ci, nullptr, &g_sh.reserved_sampler)) != VK_SUCCESS) g_sh.reserved_sampler = VK_NULL_HANDLE;
         else vk_gauge_samplers().add(1);
     }
     return g_sh.reserved_sampler ? g_sh.reserved_sampler : dummy_sampler();
@@ -3703,7 +3704,7 @@ VkBufferView make_buffer_view(VkBuffer buffer, VkDeviceSize offset, VkDeviceSize
     ci.offset = offset;
     ci.range = range;
     VkBufferView v = VK_NULL_HANDLE;
-    if (vkCreateBufferView(vkdev(), &ci, nullptr, &v) != VK_SUCCESS) v = VK_NULL_HANDLE;
+    if (NXRT_VK(vkCreateBufferView(vkdev(), &ci, nullptr, &v)) != VK_SUCCESS) v = VK_NULL_HANDLE;
     g_bufviews.emplace(key, v);   // a failure is remembered too (null), so it is not retried every draw
     return v;
 }

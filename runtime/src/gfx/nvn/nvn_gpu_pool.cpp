@@ -20,6 +20,7 @@
 #include <windows.h>
 
 #include "nxrt/config.h"
+#include "nxrt/diag.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/log.h"
 #include "nxrt/gauge.h"
@@ -230,7 +231,7 @@ bool import_range(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size, const c
                 VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT |
                 (device().features().transform_feedback ? VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT : 0u);
     bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    r = vkCreateBuffer(dev.device(), &bci, nullptr, &c.buffer);
+    r = NXRT_VK(vkCreateBuffer(dev.device(), &bci, nullptr, &c.buffer));
     if (r == VK_SUCCESS) vk_gauge_buffers().add(1);
     else c.buffer = VK_NULL_HANDLE;
     if (r != VK_SUCCESS) { c.failed = true; return false; }

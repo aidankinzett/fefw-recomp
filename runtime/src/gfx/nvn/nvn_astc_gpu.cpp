@@ -24,6 +24,7 @@
 #include <thread>
 
 #include "nxrt/config.h"
+#include "nxrt/diag.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
@@ -511,7 +512,7 @@ bool run_sync(const uint8_t* blocks, const uint8_t* texels, uint32_t w, uint32_t
         out.rgba.assign(p, p + out_bytes);
         out.blocks.assign(p + out_bytes, p + out_bytes + bc_bytes);
         uint64_t ts[3] = {};
-        if (vkGetQueryPoolResults(vkdev(), s.qpool, q0, 3, sizeof ts, ts, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS) {
+        if (NXRT_VK(vkGetQueryPoolResults(vkdev(), s.qpool, q0, 3, sizeof ts, ts, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT)) == VK_SUCCESS) {
             out.decode_ms = static_cast<double>(ts[1] - ts[0]) * s.ts_period_ns * 1e-6;
             out.encode_ms = static_cast<double>(ts[2] - ts[1]) * s.ts_period_ns * 1e-6;
         }
@@ -745,11 +746,11 @@ bool make_pipeline(const uint32_t* code, size_t bytes, VkPipeline* out) {
     mi.codeSize = bytes;
     mi.pCode = code;
     VkShaderModule m = VK_NULL_HANDLE;
-    if (vkCreateShaderModule(vkdev(), &mi, nullptr, &m) != VK_SUCCESS) return false;
+    if (NXRT_VK(vkCreateShaderModule(vkdev(), &mi, nullptr, &m)) != VK_SUCCESS) return false;
     VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, m, "main", nullptr};
     ci.layout = s.layout;
-    const VkResult r = vkCreateComputePipelines(vkdev(), VK_NULL_HANDLE, 1, &ci, nullptr, out);
+    const VkResult r = NXRT_VK(vkCreateComputePipelines(vkdev(), VK_NULL_HANDLE, 1, &ci, nullptr, out));
     vkDestroyShaderModule(vkdev(), m, nullptr);
     return r == VK_SUCCESS;
 }
@@ -766,14 +767,14 @@ bool create_objects(std::string& why) {
     VkDescriptorSetLayoutCreateInfo sli = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     sli.bindingCount = 2;
     sli.pBindings = b;
-    if (vkCreateDescriptorSetLayout(d, &sli, nullptr, &s.dsl) != VK_SUCCESS) return why = "descriptor set layout", false;
+    if (NXRT_VK(vkCreateDescriptorSetLayout(d, &sli, nullptr, &s.dsl)) != VK_SUCCESS) return why = "descriptor set layout", false;
     const VkPushConstantRange pcr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(DecodePush)};
     VkPipelineLayoutCreateInfo pli = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pli.setLayoutCount = 1;
     pli.pSetLayouts = &s.dsl;
     pli.pushConstantRangeCount = 1;
     pli.pPushConstantRanges = &pcr;
-    if (vkCreatePipelineLayout(d, &pli, nullptr, &s.layout) != VK_SUCCESS) return why = "pipeline layout", false;
+    if (NXRT_VK(vkCreatePipelineLayout(d, &pli, nullptr, &s.layout)) != VK_SUCCESS) return why = "pipeline layout", false;
     if (!make_pipeline(kAstcDecodeComp, sizeof kAstcDecodeComp, &s.decode)) return why = "the decode pipeline did not build", false;
     if (!make_pipeline(kBc7EncodeComp, sizeof kBc7EncodeComp, &s.bc7)) return why = "the BC7 encode pipeline did not build", false;
     if (!make_pipeline(kBc1EncodeComp, sizeof kBc1EncodeComp, &s.bc1)) return why = "the BC1 encode pipeline did not build", false;
@@ -782,18 +783,18 @@ bool create_objects(std::string& why) {
     dpi.maxSets = 2;
     dpi.poolSizeCount = 1;
     dpi.pPoolSizes = &ps;
-    if (vkCreateDescriptorPool(d, &dpi, nullptr, &s.test_pool) != VK_SUCCESS) return why = "descriptor pool", false;
+    if (NXRT_VK(vkCreateDescriptorPool(d, &dpi, nullptr, &s.test_pool)) != VK_SUCCESS) return why = "descriptor pool", false;
     for (VkDescriptorSet* set : {&s.test_dec, &s.test_enc}) {
         VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         ai.descriptorPool = s.test_pool;
         ai.descriptorSetCount = 1;
         ai.pSetLayouts = &s.dsl;
-        if (vkAllocateDescriptorSets(d, &ai, set) != VK_SUCCESS) return why = "descriptor sets", false;
+        if (NXRT_VK(vkAllocateDescriptorSets(d, &ai, set)) != VK_SUCCESS) return why = "descriptor sets", false;
     }
     VkQueryPoolCreateInfo qi = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
     qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
     qi.queryCount = kTimeSlots * 2 + 3;
-    if (vkCreateQueryPool(d, &qi, nullptr, &s.qpool) != VK_SUCCESS) return why = "query pool", false;
+    if (NXRT_VK(vkCreateQueryPool(d, &qi, nullptr, &s.qpool)) != VK_SUCCESS) return why = "query pool", false;
     return true;
 }
 
@@ -1212,8 +1213,8 @@ Pass run_work(Work& w, Frame& f, bool budgeted) {
             State& s2 = S();
             if (slot >= 0) {
                 uint64_t r[4] = {};
-                if (s2.qpool && vkGetQueryPoolResults(vkdev(), s2.qpool, static_cast<uint32_t>(slot) * 2, 2, sizeof r, r, 2 * sizeof(uint64_t),
-                                                      VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) == VK_SUCCESS && r[1] && r[3] && r[2] >= r[0]) {
+                if (s2.qpool && NXRT_VK(vkGetQueryPoolResults(vkdev(), s2.qpool, static_cast<uint32_t>(slot) * 2, 2, sizeof r, r, 2 * sizeof(uint64_t),
+                                                      VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT)) == VK_SUCCESS && r[1] && r[3] && r[2] >= r[0]) {
                     const double ms = static_cast<double>(r[2] - r[0]) * s2.ts_period_ns * 1e-6;
                     if (ms < 60000.0) {
                         ++s2.n_timed;

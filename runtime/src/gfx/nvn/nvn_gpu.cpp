@@ -3,6 +3,7 @@
 // the timeline semaphore, deferred destruction, barriers and the public backend API (include/nxrt/nvn_backend.h).
 // Design follows smo-recomp (record on game threads, replay on one render thread) and SuperMarioWonderRecomp docs/nvn (a submit
 // is replayed under one lock and never overlaps the next); the code is new.
+#include "nxrt/diag.h"
 #include "nxrt/nvn_backend.h"
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -27,7 +28,6 @@
 #include <unordered_map>
 
 #include "nxrt/config.h"
-#include "nxrt/diag.h"
 #include "nxrt/frame_limiter.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/gauge.h"
@@ -304,13 +304,13 @@ bool create_slot(Slot& s) {
     VkCommandPoolCreateInfo ci = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     ci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
     ci.queueFamilyIndex = d.queue_family();
-    if (vkCreateCommandPool(d.device(), &ci, nullptr, &s.pool) != VK_SUCCESS) return false;
+    if (NXRT_VK(vkCreateCommandPool(d.device(), &ci, nullptr, &s.pool)) != VK_SUCCESS) return false;
     vk_gauge_command_pools().add(1);
     VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
     ai.commandPool = s.pool;
     ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     ai.commandBufferCount = 1;
-    if (vkAllocateCommandBuffers(d.device(), &ai, &s.cb) != VK_SUCCESS) return false;
+    if (NXRT_VK(vkAllocateCommandBuffers(d.device(), &ai, &s.cb)) != VK_SUCCESS) return false;
     vk_gauge_command_buffers().add(1);
     const VkBufferUsageFlags usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
                                      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
@@ -332,7 +332,7 @@ VkDescriptorPool new_dpool() {
     ci.poolSizeCount = sizeof(sizes) / sizeof(sizes[0]);
     ci.pPoolSizes = sizes;
     VkDescriptorPool p = VK_NULL_HANDLE;
-    if (vkCreateDescriptorPool(g->dev->device(), &ci, nullptr, &p) != VK_SUCCESS) return VK_NULL_HANDLE;
+    if (NXRT_VK(vkCreateDescriptorPool(g->dev->device(), &ci, nullptr, &p)) != VK_SUCCESS) return VK_NULL_HANDLE;
     vk_gauge_descriptor_pools().add(1);
     return p;
 }
@@ -361,7 +361,7 @@ void flush_batch() {
         const uint64_t tl = nxrt::hitch_ticks();
         std::lock_guard<std::mutex> lk(g->dev->queue_mutex());
         nxrt::hitch_phase_add(nxrt::kHpRenderLockWait, nxrt::hitch_ticks() - tl);
-        r = vkQueueSubmit2(g->dev->queue(), 1, &si, VK_NULL_HANDLE);
+        r = NXRT_VK(vkQueueSubmit2(g->dev->queue(), 1, &si, VK_NULL_HANDLE));
     }
     if (r != VK_SUCCESS) {
         NXLOG_E(kTag, "vkQueueSubmit2 failed (%d): the device is lost or out of memory", static_cast<int>(r));
@@ -395,11 +395,11 @@ bool split_submission(Frame& f) {
         ai.commandPool = s.pool;
         ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         ai.commandBufferCount = 1;
-        if (vkAllocateCommandBuffers(g->dev->device(), &ai, &next) != VK_SUCCESS) return false;
+        if (NXRT_VK(vkAllocateCommandBuffers(g->dev->device(), &ai, &next)) != VK_SUCCESS) return false;
         vk_gauge_command_buffers().add(1);
     }
     if (!g->batch.empty()) flush_batch();       // keep the submission order
-    if (vkEndCommandBuffer(s.cb) != VK_SUCCESS) {
+    if (NXRT_VK(vkEndCommandBuffer(s.cb)) != VK_SUCCESS) {
         s.split_free.push_back(next);
         return false;
     }
@@ -415,7 +415,7 @@ bool split_submission(Frame& f) {
         const uint64_t tl = nxrt::hitch_ticks();
         std::lock_guard<std::mutex> lk(g->dev->queue_mutex());
         nxrt::hitch_phase_add(nxrt::kHpRenderLockWait, nxrt::hitch_ticks() - tl);
-        r = vkQueueSubmit2(g->dev->queue(), 1, &si, VK_NULL_HANDLE);
+        r = NXRT_VK(vkQueueSubmit2(g->dev->queue(), 1, &si, VK_NULL_HANDLE));
     }
     if (r != VK_SUCCESS) NXLOG_E(kTag, "vkQueueSubmit2 of a split submission failed (%d)", static_cast<int>(r));
     s.split_used.push_back(s.cb);
@@ -458,7 +458,7 @@ void wait_serial_blocking(uint64_t serial) {
     wi.semaphoreCount = 1;
     wi.pSemaphores = &g->timeline;
     wi.pValues = &serial;
-    VkResult r = vkWaitSemaphores(g->dev->device(), &wi, UINT64_MAX);
+    VkResult r = NXRT_VK(vkWaitSemaphores(g->dev->device(), &wi, UINT64_MAX));
     if (r != VK_SUCCESS) NXLOG_E(kTag, "vkWaitSemaphores failed (%d)", static_cast<int>(r));
     read_completed();
 }
@@ -539,7 +539,7 @@ Slot& acquire_slot() {
         s.timed = false;
         uint64_t ts[2] = {0, 0};
         const uint32_t idx = static_cast<uint32_t>(&s - g->slots) * 2;
-        if (vkGetQueryPoolResults(g->dev->device(), g->qpool, idx, 2, sizeof ts, ts, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && ts[1] >= ts[0]) {
+        if (NXRT_VK(vkGetQueryPoolResults(g->dev->device(), g->qpool, idx, 2, sizeof ts, ts, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT)) == VK_SUCCESS && ts[1] >= ts[0]) {
             static const uint16_t z = ft::zone_id("gpu.exec");
             const double ns = static_cast<double>(ts[1] - ts[0]) * g->dev->properties().limits.timestampPeriod;
             if (ft::on()) ft::event(z, s.cpu_t0, s.cpu_t0 + static_cast<uint64_t>(ns), static_cast<uint32_t>(s.serial));
@@ -555,7 +555,7 @@ Slot& acquire_slot() {
         uint64_t ts[kGpMax];
         const uint32_t n = std::min(s.gp_n, kGpMax);
         const uint32_t base = static_cast<uint32_t>(&s - g->slots) * kGpMax;
-        if (vkGetQueryPoolResults(g->dev->device(), g->gpool, base, n, sizeof(uint64_t) * n, ts, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+        if (NXRT_VK(vkGetQueryPoolResults(g->dev->device(), g->gpool, base, n, sizeof(uint64_t) * n, ts, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT)) == VK_SUCCESS) {
             static std::map<std::string, uint16_t> zones;
             const double period = g->dev->properties().limits.timestampPeriod;
             uint64_t t = s.cpu_t0;
@@ -719,7 +719,7 @@ VkDescriptorSet Frame::alloc_set(VkDescriptorSetLayout layout) {
         ai.descriptorSetCount = 1;
         ai.pSetLayouts = &layout;
         VkDescriptorSet set = VK_NULL_HANDLE;
-        const VkResult r = vkAllocateDescriptorSets(g->dev->device(), &ai, &set);
+        const VkResult r = NXRT_VK(vkAllocateDescriptorSets(g->dev->device(), &ai, &set));
         if (r == VK_SUCCESS) {
             g->ctr.descriptor_sets.fetch_add(1, std::memory_order_relaxed);
             s.sets_live++;
@@ -1001,7 +1001,7 @@ uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint
         const uint64_t tl = nxrt::hitch_ticks();
         std::lock_guard<std::mutex> lk(g->dev->queue_mutex());
         nxrt::hitch_phase_add(nxrt::kHpRenderLockWait, nxrt::hitch_ticks() - tl);
-        r = vkQueueSubmit2(g->dev->queue(), 1, &si, VK_NULL_HANDLE);
+        r = NXRT_VK(vkQueueSubmit2(g->dev->queue(), 1, &si, VK_NULL_HANDLE));
         if (r == VK_SUCCESS) vkQueueWaitIdle(g->dev->queue());   // nothing else tells when it is done
     }
     if (pool_copy_pending()) pool_copy_end();
@@ -1176,7 +1176,7 @@ bool wait_serial(uint64_t serial, uint64_t timeout_ns) {
     wi.pValues = &serial;
     VkResult r;
     if (!g->frame_batch) {
-        r = vkWaitSemaphores(g->dev->device(), &wi, timeout_ns);
+        r = NXRT_VK(vkWaitSemaphores(g->dev->device(), &wi, timeout_ns));
     } else {
         // submit_batch = frame: waited in slices, asking again for the flush between them, so a request the render thread missed
         // costs 50 ms instead of the game.
@@ -1189,7 +1189,7 @@ bool wait_serial(uint64_t serial, uint64_t timeout_ns) {
                 const auto left = std::chrono::duration_cast<std::chrono::nanoseconds>(deadline - std::chrono::steady_clock::now()).count();
                 slice = left <= 0 ? 0 : std::min<uint64_t>(kSliceNs, static_cast<uint64_t>(left));
             }
-            r = vkWaitSemaphores(g->dev->device(), &wi, slice);
+            r = NXRT_VK(vkWaitSemaphores(g->dev->device(), &wi, slice));
             if (r != VK_TIMEOUT || slice < kSliceNs) break;
             want_flush(serial, true);
         }
@@ -1418,7 +1418,7 @@ bool bring_up(gfx::Device& dev, gfx::Renderer* rend, FrameLimiter* limiter, bool
     VkSemaphoreTypeCreateInfo tci = {VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
     tci.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
     VkSemaphoreCreateInfo sci = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, &tci};
-    if (vkCreateSemaphore(dev.device(), &sci, nullptr, &gp->timeline) != VK_SUCCESS) {
+    if (NXRT_VK(vkCreateSemaphore(dev.device(), &sci, nullptr, &gp->timeline)) != VK_SUCCESS) {
         g = nullptr;
         delete gp;
         return false;
@@ -1437,14 +1437,14 @@ bool bring_up(gfx::Device& dev, gfx::Renderer* rend, FrameLimiter* limiter, bool
         VkQueryPoolCreateInfo qi = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
         qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
         qi.queryCount = kSlots * 2;
-        if (vkCreateQueryPool(dev.device(), &qi, nullptr, &gp->qpool) != VK_SUCCESS) gp->qpool = VK_NULL_HANDLE;
+        if (NXRT_VK(vkCreateQueryPool(dev.device(), &qi, nullptr, &gp->qpool)) != VK_SUCCESS) gp->qpool = VK_NULL_HANDLE;
         else vk_gauge_query_pools().add(1);
     }
     if ((ft::on() || gp->stats.every > 0) && config_get_bool("prof", "gpu_passes", false)) {
         VkQueryPoolCreateInfo qi = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
         qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
         qi.queryCount = kSlots * kGpMax;
-        if (vkCreateQueryPool(dev.device(), &qi, nullptr, &gp->gpool) != VK_SUCCESS) gp->gpool = VK_NULL_HANDLE;
+        if (NXRT_VK(vkCreateQueryPool(dev.device(), &qi, nullptr, &gp->gpool)) != VK_SUCCESS) gp->gpool = VK_NULL_HANDLE;
         else vk_gauge_query_pools().add(1);
     }
     if (ft::on()) extras::lowlat_set_backlog_fn([]() -> uint64_t {      // latency probe: submissions the GPU has not finished
@@ -1456,7 +1456,10 @@ bool bring_up(gfx::Device& dev, gfx::Renderer* rend, FrameLimiter* limiter, bool
     });
     extras::lowlat_set_gpu_wait_fn(&gpu_wait_frames);
     static const bool report_registered = (diag_add_report(gpu_report), true);   // the freeze dump shows the GPU state
+    // the first-failure record names the serial and timeline the process was at when the first Vulkan call failed
+    static const bool submit_state_registered = (diag_set_submit_state(gpu_report), true);
     (void)report_registered;
+    (void)submit_state_registered;
     register_counter_gauges();
     cmdq::install();      // [nvn] replay_threads: before the render thread records anything
     gp->th = std::thread(render_loop);

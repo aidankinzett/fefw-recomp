@@ -21,6 +21,7 @@
 #include <unordered_set>
 
 #include "nxrt/config.h"
+#include "nxrt/diag.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
@@ -130,7 +131,7 @@ void ensure_cache() {
     VkPipelineCacheCreateInfo ci = {VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
     ci.initialDataSize = data.size();
     ci.pInitialData = data.empty() ? nullptr : data.data();
-    if (vkCreatePipelineCache(vkdev(), &ci, nullptr, &g_cache) != VK_SUCCESS) {
+    if (NXRT_VK(vkCreatePipelineCache(vkdev(), &ci, nullptr, &g_cache)) != VK_SUCCESS) {
         ci.initialDataSize = 0;
         ci.pInitialData = nullptr;
         vkCreatePipelineCache(vkdev(), &ci, nullptr, &g_cache);
@@ -151,9 +152,9 @@ void save_cache() {
         // no compile into the cache while the driver reads it out (Intel only by default: pipeline_cache_locked, #124)
         std::unique_lock<std::shared_mutex> lk;
         if (pipeline_cache_locked()) lk = std::unique_lock<std::shared_mutex>(pipeline_cache_mutex());
-        if (vkGetPipelineCacheData(vkdev(), g_cache, &n, nullptr) != VK_SUCCESS || !n) return;
+        if (NXRT_VK(vkGetPipelineCacheData(vkdev(), g_cache, &n, nullptr)) != VK_SUCCESS || !n) return;
         data.resize(n);
-        if (vkGetPipelineCacheData(vkdev(), g_cache, &n, data.data()) != VK_SUCCESS) return;
+        if (NXRT_VK(vkGetPipelineCacheData(vkdev(), g_cache, &n, data.data())) != VK_SUCCESS) return;
     }
     // written to a temporary file and renamed, so a process that ends in the middle of it leaves the old cache intact
     const std::string tmp = g_cache_path + ".tmp";
@@ -296,7 +297,7 @@ static VkShaderModule create_module(const std::vector<uint32_t>& words, const ch
     ci.codeSize = code->size() * 4;
     ci.pCode = code->data();
     VkShaderModule m = VK_NULL_HANDLE;
-    const VkResult r = vkCreateShaderModule(vkdev(), &ci, nullptr, &m);
+    const VkResult r = NXRT_VK(vkCreateShaderModule(vkdev(), &ci, nullptr, &m));
     if (r != VK_SUCCESS) {
         NXLOG_E(kTag, "vkCreateShaderModule failed (%d) for %s", static_cast<int>(r), what);
         return m;
@@ -767,7 +768,7 @@ const ProgLayout* prog_layout(const ShaderInfo* const stages[6]) {
             if (set == 0 && pl.push_set0) ci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
             ci.bindingCount = static_cast<uint32_t>(lbs[set].size());
             ci.pBindings = lbs[set].data();
-            if (vkCreateDescriptorSetLayout(vkdev(), &ci, nullptr, &nl.sets[set]) != VK_SUCCESS) {
+            if (NXRT_VK(vkCreateDescriptorSetLayout(vkdev(), &ci, nullptr, &nl.sets[set])) != VK_SUCCESS) {
                 NXLOG_E(kTag, "descriptor set layout %d failed", set);
                 return nullptr;
             }
@@ -778,7 +779,7 @@ const ProgLayout* prog_layout(const ShaderInfo* const stages[6]) {
         pci.pSetLayouts = nl.sets;
         pci.pushConstantRangeCount = pcr.size ? 1 : 0;
         pci.pPushConstantRanges = pcr.size ? &pcr : nullptr;
-        if (vkCreatePipelineLayout(vkdev(), &pci, nullptr, &nl.layout) != VK_SUCCESS) {
+        if (NXRT_VK(vkCreatePipelineLayout(vkdev(), &pci, nullptr, &nl.layout)) != VK_SUCCESS) {
             NXLOG_E(kTag, "pipeline layout failed");
             return nullptr;
         }
@@ -863,7 +864,7 @@ const ProgLayout* alpha_layout(const ProgLayout& base) {
     pci.pushConstantRangeCount = 1;
     pci.pPushConstantRanges = &pcr;
     VkPipelineLayout layout = VK_NULL_HANDLE;
-    if (vkCreatePipelineLayout(vkdev(), &pci, nullptr, &layout) != VK_SUCCESS) {
+    if (NXRT_VK(vkCreatePipelineLayout(vkdev(), &pci, nullptr, &layout)) != VK_SUCCESS) {
         NXLOG_E(kTag, "alpha test pipeline layout failed: the draws run without the alpha test");
         return &base;
     }
@@ -1142,7 +1143,7 @@ static VkPipeline create_compute(const ShaderInfo* cs, VkPipelineLayout layout, 
     const uint64_t tp0 = nxrt::hitch_ticks();
     std::shared_lock<std::shared_mutex> cache_lk;   // pipeline_cache_locked (#124)
     if (g_cache && pipeline_cache_locked()) cache_lk = std::shared_lock<std::shared_mutex>(pipeline_cache_mutex());
-    const VkResult cr = vkCreateComputePipelines(vkdev(), g_cache, 1, &ci, nullptr, &pipe);
+    const VkResult cr = NXRT_VK(vkCreateComputePipelines(vkdev(), g_cache, 1, &ci, nullptr, &pipe));
     if (cache_lk.owns_lock()) cache_lk.unlock();
     if (nxrt::hitch_on_render_thread()) nxrt::hitch_phase_add(nxrt::kHpRenderPipeline, nxrt::hitch_ticks() - tp0);
     compiles_in_flight().fetch_sub(1, std::memory_order_relaxed);
@@ -1666,7 +1667,7 @@ PoolPair* pool_pair(TexturePool* tp, SamplerPool* sp) {
     ci.maxSets = g_pool_copies;
     ci.poolSizeCount = residency_on() ? 3 : 2;
     ci.pPoolSizes = sizes;
-    const VkResult r = vkCreateDescriptorPool(vkdev(), &ci, nullptr, &p->dpool);
+    const VkResult r = NXRT_VK(vkCreateDescriptorPool(vkdev(), &ci, nullptr, &p->dpool));
     if (r != VK_SUCCESS) {
         NXLOG_E(kTag, "pool arrays: descriptor pool for %u sets failed (%d)", g_pool_copies, static_cast<int>(r));
         return nullptr;
@@ -1764,7 +1765,7 @@ VkDescriptorSetLayout pool_set_layout() {
     ci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
     ci.bindingCount = nb;
     ci.pBindings = b;
-    if (vkCreateDescriptorSetLayout(vkdev(), &ci, nullptr, &g_pool_layout) != VK_SUCCESS) {
+    if (NXRT_VK(vkCreateDescriptorSetLayout(vkdev(), &ci, nullptr, &g_pool_layout)) != VK_SUCCESS) {
         NXLOG_E(kTag, "pool arrays: descriptor set layout failed");
         g_pool_layout = VK_NULL_HANDLE;
     }
@@ -1800,7 +1801,7 @@ VkDescriptorSet pool_set(TexturePool* tp, SamplerPool* sp, Frame& f) {
         ai.descriptorPool = pp->dpool;
         ai.descriptorSetCount = 1;
         ai.pSetLayouts = &g_pool_layout;
-        if (vkAllocateDescriptorSets(vkdev(), &ai, &c.set) == VK_SUCCESS) {
+        if (NXRT_VK(vkAllocateDescriptorSets(vkdev(), &ai, &c.set)) == VK_SUCCESS) {
             device().set_name(VK_OBJECT_TYPE_DESCRIPTOR_SET, reinterpret_cast<uint64_t>(c.set), "nvn pool arrays");
             if (residency_on()) {   // the marks' buffer (a pair without one borrows another's: its marks then stay unread)
                 VkBuffer fbuf = feedback_buffer(pp->fb);

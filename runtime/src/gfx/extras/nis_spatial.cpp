@@ -8,6 +8,7 @@
 #include <iterator>
 #include <string>
 
+#include "nxrt/diag.h"
 #include "nxrt/log.h"
 #include "../../../third_party/nvidia_nis/NIS_Config.h"
 
@@ -54,7 +55,7 @@ bool NisSpatial::init(gfx::Device& dev) {
     sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     sci.maxLod = 0.0f;
-    if (vkCreateSampler(d, &sci, nullptr, &linear_) != VK_SUCCESS) return fail("sampler");
+    if (NXRT_VK(vkCreateSampler(d, &sci, nullptr, &linear_)) != VK_SUCCESS) return fail("sampler");
 
     const VkDescriptorSetLayoutBinding b[3] = {{0, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
                                                {1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
@@ -62,38 +63,38 @@ bool NisSpatial::init(gfx::Device& dev) {
     VkDescriptorSetLayoutCreateInfo sli = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     sli.bindingCount = 3;
     sli.pBindings = b;
-    if (vkCreateDescriptorSetLayout(d, &sli, nullptr, &set_layout_) != VK_SUCCESS) return fail("set layout");
+    if (NXRT_VK(vkCreateDescriptorSetLayout(d, &sli, nullptr, &set_layout_)) != VK_SUCCESS) return fail("set layout");
     VkPushConstantRange pcr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, kPushBytes};
     VkPipelineLayoutCreateInfo pli = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pli.setLayoutCount = 1;
     pli.pSetLayouts = &set_layout_;
     pli.pushConstantRangeCount = 1;
     pli.pPushConstantRanges = &pcr;
-    if (vkCreatePipelineLayout(d, &pli, nullptr, &layout_) != VK_SUCCESS) return fail("pipeline layout");
+    if (NXRT_VK(vkCreatePipelineLayout(d, &pli, nullptr, &layout_)) != VK_SUCCESS) return fail("pipeline layout");
 
     const VkDescriptorPoolSize ps[3] = {{VK_DESCRIPTOR_TYPE_SAMPLER, kSetRing}, {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kSetRing}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kSetRing}};
     VkDescriptorPoolCreateInfo dpi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpi.maxSets = kSetRing;
     dpi.poolSizeCount = 3;
     dpi.pPoolSizes = ps;
-    if (vkCreateDescriptorPool(d, &dpi, nullptr, &pool_) != VK_SUCCESS) return fail("descriptor pool");
+    if (NXRT_VK(vkCreateDescriptorPool(d, &dpi, nullptr, &pool_)) != VK_SUCCESS) return fail("descriptor pool");
     VkDescriptorSetLayout ls[kSetRing];
     for (auto& x : ls) x = set_layout_;
     VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     ai.descriptorPool = pool_;
     ai.descriptorSetCount = kSetRing;
     ai.pSetLayouts = ls;
-    if (vkAllocateDescriptorSets(d, &ai, sets_) != VK_SUCCESS) return fail("descriptor sets");
+    if (NXRT_VK(vkAllocateDescriptorSets(d, &ai, sets_)) != VK_SUCCESS) return fail("descriptor sets");
 
     VkShaderModuleCreateInfo mi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     mi.codeSize = sizeof kNisScalerComp;
     mi.pCode = kNisScalerComp;
     VkShaderModule m = VK_NULL_HANDLE;
-    if (vkCreateShaderModule(d, &mi, nullptr, &m) != VK_SUCCESS) return fail("shader module");
+    if (NXRT_VK(vkCreateShaderModule(d, &mi, nullptr, &m)) != VK_SUCCESS) return fail("shader module");
     VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, m, "main", nullptr};
     ci.layout = layout_;
-    const VkResult r = vkCreateComputePipelines(d, VK_NULL_HANDLE, 1, &ci, nullptr, &pipe_);
+    const VkResult r = NXRT_VK(vkCreateComputePipelines(d, VK_NULL_HANDLE, 1, &ci, nullptr, &pipe_));
     vkDestroyShaderModule(d, m, nullptr);
     if (r != VK_SUCCESS) return fail("pipeline");
     NXLOG_I(kTag, "NVIDIA Image Scaling v1.0.3 ready");

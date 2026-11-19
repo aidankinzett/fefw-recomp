@@ -12,6 +12,7 @@
 #include <mutex>
 
 #include "nxrt/config.h"
+#include "nxrt/diag.h"
 #include "nxrt/extras.h"
 #include "nxrt/gfx.h"
 #include "nxrt/log.h"
@@ -193,7 +194,7 @@ bool init_gpu(State& s, gfx::Device& dev) {
     sci.magFilter = sci.minFilter = VK_FILTER_NEAREST;
     sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    if (vkCreateSampler(d, &sci, nullptr, &s.nearest) != VK_SUCCESS) return false;
+    if (NXRT_VK(vkCreateSampler(d, &sci, nullptr, &s.nearest)) != VK_SUCCESS) return false;
     const VkDescriptorSetLayoutBinding b[5] = {
         {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
         {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
@@ -203,23 +204,23 @@ bool init_gpu(State& s, gfx::Device& dev) {
     VkDescriptorSetLayoutCreateInfo li = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     li.bindingCount = 5;
     li.pBindings = b;
-    if (vkCreateDescriptorSetLayout(d, &li, nullptr, &s.set_layout) != VK_SUCCESS) return false;
+    if (NXRT_VK(vkCreateDescriptorSetLayout(d, &li, nullptr, &s.set_layout)) != VK_SUCCESS) return false;
     VkPushConstantRange pcr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Push)};
     VkPipelineLayoutCreateInfo pli = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pli.setLayoutCount = 1;
     pli.pSetLayouts = &s.set_layout;
     pli.pushConstantRangeCount = 1;
     pli.pPushConstantRanges = &pcr;
-    if (vkCreatePipelineLayout(d, &pli, nullptr, &s.layout) != VK_SUCCESS) return false;
+    if (NXRT_VK(vkCreatePipelineLayout(d, &pli, nullptr, &s.layout)) != VK_SUCCESS) return false;
     VkShaderModuleCreateInfo mi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     mi.codeSize = sizeof(kTemporalPrepComp);
     mi.pCode = kTemporalPrepComp;
     VkShaderModule mod = VK_NULL_HANDLE;
-    if (vkCreateShaderModule(d, &mi, nullptr, &mod) != VK_SUCCESS) return false;
+    if (NXRT_VK(vkCreateShaderModule(d, &mi, nullptr, &mod)) != VK_SUCCESS) return false;
     VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", nullptr};
     ci.layout = s.layout;
-    const VkResult pr = vkCreateComputePipelines(d, VK_NULL_HANDLE, 1, &ci, nullptr, &s.pipe);
+    const VkResult pr = NXRT_VK(vkCreateComputePipelines(d, VK_NULL_HANDLE, 1, &ci, nullptr, &s.pipe));
     vkDestroyShaderModule(d, mod, nullptr);
     if (pr != VK_SUCCESS) return false;
     const VkDescriptorPoolSize ps[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * State::kRing}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3 * State::kRing}};
@@ -227,14 +228,14 @@ bool init_gpu(State& s, gfx::Device& dev) {
     pci.maxSets = State::kRing;
     pci.poolSizeCount = 2;
     pci.pPoolSizes = ps;
-    if (vkCreateDescriptorPool(d, &pci, nullptr, &s.pool) != VK_SUCCESS) return false;
+    if (NXRT_VK(vkCreateDescriptorPool(d, &pci, nullptr, &s.pool)) != VK_SUCCESS) return false;
     VkDescriptorSetLayout layouts[State::kRing];
     std::fill(std::begin(layouts), std::end(layouts), s.set_layout);
     VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     ai.descriptorPool = s.pool;
     ai.descriptorSetCount = State::kRing;
     ai.pSetLayouts = layouts;
-    if (vkAllocateDescriptorSets(d, &ai, s.sets) != VK_SUCCESS) return false;
+    if (NXRT_VK(vkAllocateDescriptorSets(d, &ai, s.sets)) != VK_SUCCESS) return false;
     s.init_ok = true;
     return true;
 }

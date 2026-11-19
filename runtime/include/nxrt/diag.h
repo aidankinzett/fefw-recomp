@@ -40,6 +40,27 @@ void diag_note_file(const char* what, const char* path);       // what: "open", 
 std::vector<std::string> diag_recent_files();                  // oldest first, "[tid] what path"
 void diag_clear_recent_files();
 
+// ---- first VkResult failure ----------------------------------------------------------------------------------------------
+// A crash or device-loss report otherwise names whichever call lost the race, not the first one that failed: after the GPU goes away
+// every call fails, and the reporter's file ends up describing a consequence (a fence wait 17 ms after the batch submit that really
+// failed, #81). The first non-success VkResult anywhere in the process is recorded here once, with the call and its site, the thread,
+// how far into the run it happened, the frames presented and the submit state at that moment, and is never replaced by a later
+// failure. Every call site that can fail with a device-level result wraps the call in NXRT_VK(), which costs one integer compare on
+// the success path (no lock, no allocation, nothing logged) and records the result only when it is not VK_SUCCESS.
+void diag_vk_note(int result, const char* call, const char* file, int line);
+template <class R>
+inline R diag_vk_check(R result, const char* call, const char* file, int line) {
+    if (static_cast<int>(result) != 0) diag_vk_note(static_cast<int>(result), call, file, line);
+    return result;
+}
+// NXRT_VK(vkSomething(...)): the call, with its result recorded if it fails. Works for any enum-shaped result (VK_SUCCESS is 0).
+#define NXRT_VK(call) (::nxrt::diag_vk_check((call), #call, __FILE__, __LINE__))
+// What the NVN back end reports about its submissions (last submitted serial, timeline value, submits, presents), asked once when the
+// first failure is recorded and in every dump: the generic diagnostic layer does not know those counters.
+void diag_set_submit_state(std::string (*fn)());
+// The record as report text (a header line and its detail), "(none)" when no Vulkan call has failed: the top of a crash report.
+std::string diag_vk_failure_text();
+
 // ---- crash handler -------------------------------------------------------------------------------------------------------
 struct CrashOptions {
     const char* report_path = nullptr;   // nullptr: "<exe name>_crash.txt" next to the exe; "" = no file

@@ -16,6 +16,7 @@
 #include <tuple>
 
 #include "nxrt/config.h"
+#include "nxrt/diag.h"
 #include "nxrt/gauge.h"
 #include "nxrt/memguard.h"
 #include "nxrt/gfx.h"
@@ -45,7 +46,7 @@ VKAPI_ATTR VkResult VKAPI_CALL counted_allocate_memory(VkDevice d, const VkMemor
     static std::atomic<bool> injected{false};
     const bool fail = inject && !info->pNext && info->allocationSize <= 65536 && !injected.exchange(true);
     if (fail) NXLOG_W("vk.memory", "diagnostic small allocation failure injected");
-    const VkResult r = fail ? VK_ERROR_OUT_OF_DEVICE_MEMORY : driver_allocate_memory(d, info, cb, out);
+    const VkResult r = fail ? VK_ERROR_OUT_OF_DEVICE_MEMORY : NXRT_VK(driver_allocate_memory(d, info, cb, out));
     if (r == VK_SUCCESS) {
         std::lock_guard<std::mutex> lock(memory_count_mu);
         memory_sizes[*out] = info->allocationSize;
@@ -628,7 +629,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     ici.enabledExtensionCount = static_cast<uint32_t>(inst_exts.size());
     ici.ppEnabledExtensionNames = inst_exts.data();
     ici.pNext = vfeat_ok ? static_cast<void*>(&vfeat) : (debug_utils_ ? static_cast<void*>(&dbg) : nullptr);
-    VkResult r = vkCreateInstance(&ici, nullptr, &instance_);
+    VkResult r = NXRT_VK(vkCreateInstance(&ici, nullptr, &instance_));
     if (r != VK_SUCCESS) return fail("vkCreateInstance failed (" + std::to_string(r) + ")");
     volkLoadInstance(instance_);
     features_.swapchain_colorspace = x_colorspace;
@@ -643,7 +644,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
             ci.hinstance = static_cast<HINSTANCE>(platform::native_hinstance());
             if (!ci.hwnd || !ci.hinstance || !vkCreateWin32SurfaceKHR)
                 return fail("missing Win32 window properties or interposed surface entry point");
-            r = vkCreateWin32SurfaceKHR(instance_, &ci, nullptr, &surface_);
+            r = NXRT_VK(vkCreateWin32SurfaceKHR(instance_, &ci, nullptr, &surface_));
             if (r != VK_SUCCESS) return fail("interposed vkCreateWin32SurfaceKHR failed (" + std::to_string(r) + ")");
             NXLOG_I(kTag, "window surface created through Streamline");
         } else
@@ -983,7 +984,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     dci.pQueueCreateInfos = &qci;
     dci.enabledExtensionCount = static_cast<uint32_t>(dev_exts.size());
     dci.ppEnabledExtensionNames = dev_exts.data();
-    r = vkCreateDevice(physical_, &dci, nullptr, &device_);
+    r = NXRT_VK(vkCreateDevice(physical_, &dci, nullptr, &device_));
     if (r != VK_SUCCESS) return fail("vkCreateDevice failed (" + std::to_string(r) + ")");
     {   // What the device was created with, in the log rather than only in a report:
         // a driver that drops an extension, or a run whose swapchain extension was
@@ -1048,7 +1049,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     NXLOG_I(kTag, "video memory over the budget: memory priority %d, pageable device-local memory %d ([gfx] pageable_memory = %d)",
             mem_priority, x_page && apage.pageableDeviceLocalMemory, want_pageable);
     NXLOG_I(kTag, "video memory budget: %s", x_membudget ? "from the OS (VK_EXT_memory_budget)" : "estimated (no VK_EXT_memory_budget)");
-    r = vmaCreateAllocator(&aci, &vma_);
+    r = NXRT_VK(vmaCreateAllocator(&aci, &vma_));
     if (r != VK_SUCCESS) return fail("vmaCreateAllocator failed (" + std::to_string(r) + ")");
     register_vma_gauges(vma_, props_.deviceType);
     {
@@ -1077,9 +1078,9 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     VkCommandPoolCreateInfo cpi = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     cpi.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     cpi.queueFamilyIndex = queue_family_;
-    if (vkCreateCommandPool(device_, &cpi, nullptr, &impl_->once_pool) == VK_SUCCESS) vk_gauge_command_pools().add(1);
+    if (NXRT_VK(vkCreateCommandPool(device_, &cpi, nullptr, &impl_->once_pool)) == VK_SUCCESS) vk_gauge_command_pools().add(1);
     VkFenceCreateInfo fci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-    if (vkCreateFence(device_, &fci, nullptr, &impl_->once_fence) == VK_SUCCESS) vk_gauge_fences().add(1);
+    if (NXRT_VK(vkCreateFence(device_, &fci, nullptr, &impl_->once_fence)) == VK_SUCCESS) vk_gauge_fences().add(1);
 
     NXLOG_I(kTag, "device ready: %s (vendor 0x%04x, device 0x%04x, Vulkan %u.%u.%u, driver %s [0x%08x]), queue family %u, validation %s, %s",
             props_.deviceName, props_.vendorID, props_.deviceID, VK_API_VERSION_MAJOR(props_.apiVersion), VK_API_VERSION_MINOR(props_.apiVersion),
@@ -1173,7 +1174,7 @@ bool Device::image_supported(const ImageDesc& d, std::string* why) {
             info.usage = d.usage;
             info.flags = d.flags;
             VkImageFormatProperties2 out = {VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2};
-            val.result = vkGetPhysicalDeviceImageFormatProperties2(physical_, &info, &out);
+            val.result = NXRT_VK(vkGetPhysicalDeviceImageFormatProperties2(physical_, &info, &out));
             val.props = out.imageFormatProperties;
             impl_->fmt_checks++;
             impl_->fmt_cache.emplace(key, val);
@@ -1217,7 +1218,7 @@ VkResult Device::create_image(const ImageDesc& d, Image* out, std::string* why) 
     ai.priority = (d.usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) ? 1.0f : 0.5f;
     if (d.small_pool) {
         uint32_t mt = 0;
-        if (vmaFindMemoryTypeIndexForImageInfo(vma_, &ci, &ai, &mt) == VK_SUCCESS) {
+        if (NXRT_VK(vmaFindMemoryTypeIndexForImageInfo(vma_, &ci, &ai, &mt)) == VK_SUCCESS) {
             std::lock_guard<std::mutex> lk(impl_->small_pools_mu);
             VmaPool& pool = impl_->small_pools[mt];
             if (!pool) {
@@ -1225,7 +1226,7 @@ VkResult Device::create_image(const ImageDesc& d, Image* out, std::string* why) 
                 pci.memoryTypeIndex = mt;
                 pci.blockSize = 16ull << 20;
                 pci.priority = 0.5f;
-                if (vmaCreatePool(vma_, &pci, &pool) != VK_SUCCESS) pool = nullptr;
+                if (NXRT_VK(vmaCreatePool(vma_, &pci, &pool)) != VK_SUCCESS) pool = nullptr;
             }
             ai.pool = pool;
         }
@@ -1233,7 +1234,7 @@ VkResult Device::create_image(const ImageDesc& d, Image* out, std::string* why) 
     Image img;
     VkImage handle = VK_NULL_HANDLE;
     VmaAllocation alloc = nullptr;
-    VkResult r = vmaCreateImage(vma_, &ci, &ai, &handle, &alloc, nullptr);
+    VkResult r = NXRT_VK(vmaCreateImage(vma_, &ci, &ai, &handle, &alloc, nullptr));
     if (r != VK_SUCCESS) {
         if (why) *why = "vmaCreateImage failed (" + std::to_string(r) + ")";
         return r;
@@ -1262,7 +1263,7 @@ VkResult Device::create_image(const ImageDesc& d, Image* out, std::string* why) 
         else if (d.flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) vi.viewType = d.array_layers > 6 ? VK_IMAGE_VIEW_TYPE_CUBE_ARRAY : VK_IMAGE_VIEW_TYPE_CUBE;
         else vi.viewType = d.array_layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
         vi.subresourceRange = {aspect_of(d.format), 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
-        r = vkCreateImageView(device_, &vi, nullptr, &img.view);
+        r = NXRT_VK(vkCreateImageView(device_, &vi, nullptr, &img.view));
         if (r != VK_SUCCESS) {
             VmaAllocationInfo inf{};
             vmaGetAllocationInfo(vma_, alloc, &inf);
@@ -1310,7 +1311,7 @@ VkResult Device::create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, Memo
     if (use == MemoryUse::Readback) ai.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
     VmaAllocationInfo info = {};
     Buffer b;
-    VkResult r = vmaCreateBuffer(vma_, &bi, &ai, &b.buffer, &b.allocation, &info);
+    VkResult r = NXRT_VK(vmaCreateBuffer(vma_, &bi, &ai, &b.buffer, &b.allocation, &info));
     if (r != VK_SUCCESS) return r;
     vk_gauge_buffers().add(1);
     {
@@ -1373,7 +1374,7 @@ bool Device::submit_once(const std::function<void(VkCommandBuffer)>& fn) {
     ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     ai.commandBufferCount = 1;
     VkCommandBuffer cmd = VK_NULL_HANDLE;
-    if (vkAllocateCommandBuffers(device_, &ai, &cmd) != VK_SUCCESS) return false;
+    if (NXRT_VK(vkAllocateCommandBuffers(device_, &ai, &cmd)) != VK_SUCCESS) return false;
     vk_gauge_command_buffers().add(1);
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -1386,9 +1387,9 @@ bool Device::submit_once(const std::function<void(VkCommandBuffer)>& fn) {
     bool ok;
     {
         std::lock_guard<std::mutex> ql(queue_mutex_);
-        ok = vkQueueSubmit(queue_, 1, &si, impl_->once_fence) == VK_SUCCESS;
+        ok = NXRT_VK(vkQueueSubmit(queue_, 1, &si, impl_->once_fence)) == VK_SUCCESS;
     }
-    if (ok) ok = vkWaitForFences(device_, 1, &impl_->once_fence, VK_TRUE, UINT64_MAX) == VK_SUCCESS;
+    if (ok) ok = NXRT_VK(vkWaitForFences(device_, 1, &impl_->once_fence, VK_TRUE, UINT64_MAX)) == VK_SUCCESS;
     vkResetFences(device_, 1, &impl_->once_fence);
     vkFreeCommandBuffers(device_, impl_->once_pool, 1, &cmd);
     vk_gauge_command_buffers().sub(1);

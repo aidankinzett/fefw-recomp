@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "nxrt/diag.h"
 #include "nxrt/log.h"
 #include "vk_gauges.h"
 
@@ -40,17 +41,17 @@ bool PresentPass::init(gfx::Device& dev, VkFormat color_format) {
     sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     sci.maxLod = 0.0f;
-    if (vkCreateSampler(d, &sci, nullptr, &linear_) != VK_SUCCESS) return fail("linear sampler");
+    if (NXRT_VK(vkCreateSampler(d, &sci, nullptr, &linear_)) != VK_SUCCESS) return fail("linear sampler");
     vk_gauge_samplers().add(1);
     sci.magFilter = sci.minFilter = VK_FILTER_NEAREST;
-    if (vkCreateSampler(d, &sci, nullptr, &nearest_) != VK_SUCCESS) return fail("nearest sampler");
+    if (NXRT_VK(vkCreateSampler(d, &sci, nullptr, &nearest_)) != VK_SUCCESS) return fail("nearest sampler");
     vk_gauge_samplers().add(1);
 
     VkDescriptorSetLayoutBinding bind = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
     VkDescriptorSetLayoutCreateInfo dli = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     dli.bindingCount = 1;
     dli.pBindings = &bind;
-    if (vkCreateDescriptorSetLayout(d, &dli, nullptr, &set_layout_) != VK_SUCCESS) return fail("descriptor set layout");
+    if (NXRT_VK(vkCreateDescriptorSetLayout(d, &dli, nullptr, &set_layout_)) != VK_SUCCESS) return fail("descriptor set layout");
     vk_gauge_descriptor_set_layouts().add(1);
 
     VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kSetRing};
@@ -58,7 +59,7 @@ bool PresentPass::init(gfx::Device& dev, VkFormat color_format) {
     dpi.maxSets = kSetRing;
     dpi.poolSizeCount = 1;
     dpi.pPoolSizes = &ps;
-    if (vkCreateDescriptorPool(d, &dpi, nullptr, &pool_) != VK_SUCCESS) return fail("descriptor pool");
+    if (NXRT_VK(vkCreateDescriptorPool(d, &dpi, nullptr, &pool_)) != VK_SUCCESS) return fail("descriptor pool");
     vk_gauge_descriptor_pools().add(1);
     VkDescriptorSetLayout layouts[kSetRing];
     for (auto& l : layouts) l = set_layout_;
@@ -66,7 +67,7 @@ bool PresentPass::init(gfx::Device& dev, VkFormat color_format) {
     dai.descriptorPool = pool_;
     dai.descriptorSetCount = kSetRing;
     dai.pSetLayouts = layouts;
-    if (vkAllocateDescriptorSets(d, &dai, sets_) != VK_SUCCESS) return fail("descriptor sets");
+    if (NXRT_VK(vkAllocateDescriptorSets(d, &dai, sets_)) != VK_SUCCESS) return fail("descriptor sets");
     vk_gauge_descriptor_sets().add(kSetRing);   // shutdown subtracts them only while sets_[0] is set
 
     VkPushConstantRange pcr = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants)};
@@ -75,14 +76,14 @@ bool PresentPass::init(gfx::Device& dev, VkFormat color_format) {
     pli.pSetLayouts = &set_layout_;
     pli.pushConstantRangeCount = 1;
     pli.pPushConstantRanges = &pcr;
-    if (vkCreatePipelineLayout(d, &pli, nullptr, &layout_) != VK_SUCCESS) return fail("pipeline layout");
+    if (NXRT_VK(vkCreatePipelineLayout(d, &pli, nullptr, &layout_)) != VK_SUCCESS) return fail("pipeline layout");
     vk_gauge_pipeline_layouts().add(1);
 
     auto make_module = [&](const uint32_t* code, size_t bytes, VkShaderModule* out) {
         VkShaderModuleCreateInfo mi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
         mi.codeSize = bytes;
         mi.pCode = code;
-        const bool ok = vkCreateShaderModule(d, &mi, nullptr, out) == VK_SUCCESS;
+        const bool ok = NXRT_VK(vkCreateShaderModule(d, &mi, nullptr, out)) == VK_SUCCESS;
         if (ok) vk_gauge_shader_modules().add(1);
         return ok;
     };
@@ -135,7 +136,7 @@ bool PresentPass::init(gfx::Device& dev, VkFormat color_format) {
     gpi.pColorBlendState = &cb;
     gpi.pDynamicState = &ds;
     gpi.layout = layout_;
-    const VkResult pr = vkCreateGraphicsPipelines(d, VK_NULL_HANDLE, 1, &gpi, nullptr, &pipeline_);
+    const VkResult pr = NXRT_VK(vkCreateGraphicsPipelines(d, VK_NULL_HANDLE, 1, &gpi, nullptr, &pipeline_));
     if (pr == VK_SUCCESS) vk_gauge_pipelines().add(1);
     vkDestroyShaderModule(d, vs, nullptr);
     vk_gauge_shader_modules().sub(1);

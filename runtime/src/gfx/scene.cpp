@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 
+#include "nxrt/diag.h"
 #include "nxrt/gfx.h"
 #include "nxrt/log.h"
 #include "nxrt/scene.h"
@@ -200,26 +201,26 @@ std::unique_ptr<TestScene> TestScene::create(Device& dev, VkFormat color_format,
     sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     sci.maxLod = static_cast<float>(levels);
-    if (vkCreateSampler(d, &sci, nullptr, &s.sampler) != VK_SUCCESS) return fail("sampler");
+    if (NXRT_VK(vkCreateSampler(d, &sci, nullptr, &s.sampler)) != VK_SUCCESS) return fail("sampler");
     vk_gauge_samplers().add(1);
     VkDescriptorSetLayoutBinding bind = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
     VkDescriptorSetLayoutCreateInfo dli = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     dli.bindingCount = 1;
     dli.pBindings = &bind;
-    if (vkCreateDescriptorSetLayout(d, &dli, nullptr, &s.set_layout) != VK_SUCCESS) return fail("descriptor set layout");
+    if (NXRT_VK(vkCreateDescriptorSetLayout(d, &dli, nullptr, &s.set_layout)) != VK_SUCCESS) return fail("descriptor set layout");
     vk_gauge_descriptor_set_layouts().add(1);
     VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1};
     VkDescriptorPoolCreateInfo dpi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpi.maxSets = 1;
     dpi.poolSizeCount = 1;
     dpi.pPoolSizes = &ps;
-    if (vkCreateDescriptorPool(d, &dpi, nullptr, &s.pool) != VK_SUCCESS) return fail("descriptor pool");
+    if (NXRT_VK(vkCreateDescriptorPool(d, &dpi, nullptr, &s.pool)) != VK_SUCCESS) return fail("descriptor pool");
     vk_gauge_descriptor_pools().add(1);
     VkDescriptorSetAllocateInfo dai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     dai.descriptorPool = s.pool;
     dai.descriptorSetCount = 1;
     dai.pSetLayouts = &s.set_layout;
-    if (vkAllocateDescriptorSets(d, &dai, &s.set) != VK_SUCCESS) return fail("descriptor set");
+    if (NXRT_VK(vkAllocateDescriptorSets(d, &dai, &s.set)) != VK_SUCCESS) return fail("descriptor set");
     vk_gauge_descriptor_sets().add(1);
     VkDescriptorImageInfo dii = {s.sampler, s.texture.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkWriteDescriptorSet w = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
@@ -235,14 +236,14 @@ std::unique_ptr<TestScene> TestScene::create(Device& dev, VkFormat color_format,
     pli.pSetLayouts = &s.set_layout;
     pli.pushConstantRangeCount = 1;
     pli.pPushConstantRanges = &pcr;
-    if (vkCreatePipelineLayout(d, &pli, nullptr, &s.layout) != VK_SUCCESS) return fail("pipeline layout");
+    if (NXRT_VK(vkCreatePipelineLayout(d, &pli, nullptr, &s.layout)) != VK_SUCCESS) return fail("pipeline layout");
     vk_gauge_pipeline_layouts().add(1);
 
     auto make_module = [&](const uint32_t* code, size_t bytes, VkShaderModule* out) {
         VkShaderModuleCreateInfo mi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
         mi.codeSize = bytes;
         mi.pCode = code;
-        const bool ok = vkCreateShaderModule(d, &mi, nullptr, out) == VK_SUCCESS;
+        const bool ok = NXRT_VK(vkCreateShaderModule(d, &mi, nullptr, out)) == VK_SUCCESS;
         if (ok) vk_gauge_shader_modules().add(1);
         return ok;
     };
@@ -290,7 +291,7 @@ std::unique_ptr<TestScene> TestScene::create(Device& dev, VkFormat color_format,
     gpi.pColorBlendState = &cb;
     gpi.pDynamicState = &ds;
     gpi.layout = s.layout;
-    const VkResult pr = vkCreateGraphicsPipelines(d, VK_NULL_HANDLE, 1, &gpi, nullptr, &s.pipeline);
+    const VkResult pr = NXRT_VK(vkCreateGraphicsPipelines(d, VK_NULL_HANDLE, 1, &gpi, nullptr, &s.pipeline));
     if (pr == VK_SUCCESS) vk_gauge_pipelines().add(1);
     vkDestroyShaderModule(d, vs, nullptr);
     vk_gauge_shader_modules().sub(1);

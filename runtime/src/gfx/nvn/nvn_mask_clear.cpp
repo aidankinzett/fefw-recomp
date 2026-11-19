@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstring>
 
+#include "nxrt/diag.h"
 #include "nxrt/log.h"
 #include "vk_gauges.h"
 
@@ -37,7 +38,7 @@ bool MaskClear::init(gfx::Device& dev) {
         VkShaderModuleCreateInfo mi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
         mi.codeSize = blob.bytes;
         mi.pCode = blob.words;
-        const bool ok = vkCreateShaderModule(d, &mi, nullptr, out) == VK_SUCCESS;
+        const bool ok = NXRT_VK(vkCreateShaderModule(d, &mi, nullptr, out)) == VK_SUCCESS;
         if (ok) vk_gauge_shader_modules().add(1);
         return ok;
     };
@@ -50,7 +51,7 @@ bool MaskClear::init(gfx::Device& dev) {
     VkPipelineLayoutCreateInfo pli = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pli.pushConstantRangeCount = 1;
     pli.pPushConstantRanges = &pcr;
-    if (vkCreatePipelineLayout(d, &pli, nullptr, &layout_) != VK_SUCCESS) return fail("pipeline layout");
+    if (NXRT_VK(vkCreatePipelineLayout(d, &pli, nullptr, &layout_)) != VK_SUCCESS) return fail("pipeline layout");
     vk_gauge_pipeline_layouts().add(1);
     return true;
 }
@@ -139,7 +140,7 @@ VkPipeline MaskClear::pipeline_for(const Key& key) {
     gpi.pDynamicState = &ds;
     gpi.layout = layout_;
     VkPipeline pipe = VK_NULL_HANDLE;
-    if (vkCreateGraphicsPipelines(d, VK_NULL_HANDLE, 1, &gpi, nullptr, &pipe) != VK_SUCCESS) {
+    if (NXRT_VK(vkCreateGraphicsPipelines(d, VK_NULL_HANDLE, 1, &gpi, nullptr, &pipe)) != VK_SUCCESS) {
         NXLOG_E(kTag, "graphics pipeline failed (format %d, %u/%u attachments, mask 0x%x, kind %u)", static_cast<int>(format), index, count,
                 mask, kind);
         return VK_NULL_HANDLE;
@@ -214,7 +215,7 @@ VkPipeline MaskClear::ds_pipeline_for(const VkFormat* color_formats, uint32_t co
     gpi.pDynamicState = &dy;
     gpi.layout = layout_;
     VkPipeline pipe = VK_NULL_HANDLE;
-    if (vkCreateGraphicsPipelines(dev_->device(), VK_NULL_HANDLE, 1, &gpi, nullptr, &pipe) != VK_SUCCESS) {
+    if (NXRT_VK(vkCreateGraphicsPipelines(dev_->device(), VK_NULL_HANDLE, 1, &gpi, nullptr, &pipe)) != VK_SUCCESS) {
         NXLOG_E(kTag, "depth/stencil clear pipeline failed (depth format %d, stencil %d, %u colour attachments)", static_cast<int>(depth_format),
                 has_stencil ? 1 : 0, color_count);
         return VK_NULL_HANDLE;
