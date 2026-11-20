@@ -203,6 +203,10 @@ std::string build_report(const EXCEPTION_RECORD* rec, const CONTEXT* cx, DWORD t
     // log (and whatever call the faulting thread was in) follows from it.
     out += diag_vk_failure_text();
 
+    // The process footprint and the guard's figures (the same section the freeze dump writes): a crash on an out-of-memory path
+    // says so here, and a report from a machine we cannot reproduce still carries the numbers.
+    out += diag_memory_text("the crash");
+
     // Last guest function: the lifted function whose host code contains the faulting instruction.
     if (const uint64_t g = guest_function_of(rip))
         appendf(out, "last guest function entered: f_%llx\n", static_cast<unsigned long long>(g));
