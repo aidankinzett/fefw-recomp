@@ -120,4 +120,20 @@ std::string diag_vk_failure_text() {
     return out;
 }
 
+std::string diag_device_lost_dump(const char* where, int result, uint64_t frames, const std::string& context) {
+    char b[640];
+    std::snprintf(b, sizeof b,
+                  "GPU DEVICE LOST (reason: VK_ERROR_DEVICE_LOST)\n  %s returned %d after %llu presented frames: the graphics driver reset or removed the device\n"
+                  "  (a driver crash or timeout, an out-of-video-memory condition, or a GPU hang). The game was stopped.\n",
+                  where ? where : "?", result, static_cast<unsigned long long>(frames));
+    std::string header = b;
+    header += context;
+    header += frames == 0
+                  ? "  What to try: the first frame never finished on the GPU. Update the graphics driver; if it happens in one window mode only "
+                    "(windowed, say), use another (F1 > Display) and tell us which works; [gfx] gpu in fefw.ini picks another GPU.\n"
+                  : "  What to try: update the graphics driver; on a GPU that shares system memory (laptop, handheld) lower the render scale "
+                    "or the texture quality. Please attach this file and fefw.log to an issue.\n";
+    return diag_full_dump(header.c_str(), "device loss");
+}
+
 }  // namespace nxrt

@@ -60,25 +60,15 @@ const char* window_mode_name() {
     if (once.exchange(true)) {
         for (;;) std::this_thread::sleep_for(std::chrono::seconds(1));   // another thread is writing the report and ending the process
     }
-    char b[512];
-    std::snprintf(b, sizeof b,
-                  "GPU DEVICE LOST (reason: VK_ERROR_DEVICE_LOST)\n  %s returned %d after %llu presented frames: the graphics driver reset or removed the device\n"
-                  "  (a driver crash or timeout, an out-of-video-memory condition, or a GPU hang). The game was stopped.\n",
-                  where, static_cast<int>(r), static_cast<unsigned long long>(frames));
-    std::string text = b;
+    std::string ctx;
     {
         std::lock_guard<std::mutex> lk(g_lost_ctx_mu);
-        if (!g_lost_ctx.empty()) text += g_lost_ctx;
+        ctx = g_lost_ctx;
     }
-    text += frames == 0
-                ? "  What to try: the first frame never finished on the GPU. Update the graphics driver; if it happens in one window mode only "
-                  "(windowed, say), use another (F1 > Display) and tell us which works; [gfx] gpu in fefw.ini picks another GPU.\n"
-                : "  What to try: update the graphics driver; on a GPU that shares system memory (laptop, handheld) lower the render scale "
-                  "or the texture quality. Please attach this file and fefw.log to an issue.\n";
-    text += "\n";
-    text += diag_vk_failure_text();   // the call that really failed first, not the one that noticed the device was gone
-    text += "\n";
-    text += diag_thread_dump();
+    // The freeze dump's sections, built by the same code that writes fefw_freeze.txt: the first Vulkan failure, the memory figures, the
+    // thread dump, the guest sync waits, the NVN back end's serial and timeline, the recent dispatches. A device-loss file and a freeze
+    // file then read the same way, so a report from a player we cannot reproduce is triaged from the file alone.
+    const std::string text = diag_device_lost_dump(where, static_cast<int>(r), frames, ctx);
     for (size_t pos = 0; pos < text.size();) {
         size_t eol = text.find('\n', pos);
         if (eol == std::string::npos) eol = text.size();

@@ -126,5 +126,15 @@ uint32_t watchdog_fire_count();
 // Extra sections of the freeze dump: each function returns text (it must never block: the process may be frozen). Registered once at start-up.
 void diag_add_report(std::string (*fn)());
 std::string diag_thread_dump();        // the dump text the watchdog produces, on demand (also used by the SIGUSR-style "dump_threads" file)
+// The dump's own sections, for a report that is not the watchdog's: `when` labels the memory section ("freeze", "device loss", "crash").
+std::string diag_memory_text(const char* when);
+// Every section of a dump in one place, so the freeze report and the device-loss report have one shape: the header, the first Vulkan
+// failure, the memory figures, the thread dump, the guest sync waits and every registered extra section (the NVN back end's state,
+// the recent dispatches). Never blocks; the caller logs and writes the text.
+std::string diag_full_dump(const char* header, const char* when);
+// The device-loss report: what failed, then what the renderer knows about the GPU and the presentation (`context`, filled in by the
+// gfx layer at swapchain creation), then the advice, then every section of a dump.
+std::string diag_device_lost_dump(const char* where, int result, uint64_t frames, const std::string& context);
+
 
 }  // namespace nxrt

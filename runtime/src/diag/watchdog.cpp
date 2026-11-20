@@ -181,7 +181,7 @@ std::string format_threads(const std::vector<ThreadDump>& threads) {
 // said "no frame tick" while the last opened files pointed at audio. Recording
 // the process footprint, the guard's limit and the machine's remaining memory
 // makes the next report distinguish a deadlock from an exhausted system.
-std::string memory_text() {
+std::string memory_text(const char* when) {
     PROCESS_MEMORY_COUNTERS_EX pmc{};
     pmc.cb = sizeof pmc;
     const bool got = GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof pmc) != 0;
@@ -190,7 +190,9 @@ std::string memory_text() {
     const bool got_system = GlobalMemoryStatusEx(&ms) != 0;
     const double gb = 1024.0 * 1024.0 * 1024.0;
     char b[512];
-    std::string out = "memory at freeze:\n";
+    std::string out = "memory at ";
+    out += when;
+    out += ":\n";
     if (got) {
         std::snprintf(b, sizeof b,
                       "  private commit %.2f GB, working set %.2f GB, peak working set %.2f GB, pagefile %.2f GB\n",
@@ -277,14 +279,9 @@ std::string extra_reports() {
     return out;
 }
 
-// Header line, then the thread dump. Goes to the log and the report file; returns the full text for on_fire.
+// Header line, then every section of the dump. Goes to the log and the report file; returns the full text for on_fire.
 std::string emit_dump(const std::string& report_path, const std::string& header) {
-    std::string text = header;
-    text += '\n';
-    text += memory_text();
-    text += dump_text();
-    text += kernel::sync_wait_report();
-    text += extra_reports();
+    const std::string text = diag_full_dump(header.c_str(), "freeze");
     log_lines(text);
     write_report(report_path, text);
     return text;
@@ -337,6 +334,12 @@ void run_loop(Control* c) {
     uint64_t last_seen = g_frames.load(std::memory_order_relaxed);
     uint64_t last_progress = g_progress.load(std::memory_order_relaxed);
     bool fired = false;
+    // [diag] synthetic_dump: write that report on purpose, once, after [diag] synthetic_dump_frames presented frames, so the reports can
+    // be produced (and read) on a machine where nothing has failed. "freeze" writes the freeze report and the run goes on; "device_lost"
+    // writes the device-loss report and ends the process the way a real one does, so the order of the flush is exercised too.
+    const std::string synthetic = config_get_str("diag", "synthetic_dump", "");
+    const int64_t synthetic_after = config_get_int("diag", "synthetic_dump_frames", 120);
+    bool synthetic_done = synthetic.empty() || synthetic_after < 0;
     for (;;) {
         {
             std::unique_lock<std::mutex> lk(c->m);
@@ -367,6 +370,28 @@ void run_loop(Control* c) {
                 emit_dump(c->report_path, h2);
             }
         }
+        if (!synthetic_done && static_cast<int64_t>(frames) >= synthetic_after) {
+            synthetic_done = true;
+            if (synthetic == "freeze") {
+                std::string header;
+                appendf(header, "SYNTHETIC FREEZE (asked for with [diag] synthetic_dump, frame count %llu)",
+                        static_cast<unsigned long long>(frames));
+                emit_dump(c->report_path, header);
+                NXLOG_W("watchdog", "synthetic freeze dump written to %s", c->report_path.empty() ? "(none)" : c->report_path.c_str());
+            } else if (synthetic == "device_lost") {
+                diag_vk_note(-4, "vkQueueSubmit2", "synthetic", 0);   // the record a real device loss would carry (the report shows it)
+                const std::string text = diag_device_lost_dump("a synthetic device loss ([diag] synthetic_dump)", -4, frames, "");
+                log_lines(text);
+                const std::string path = crash_report_path();
+                write_report(path, text);
+                NXLOG_E("watchdog", "synthetic device lost report written to %s", path.c_str());
+                log_flush();
+                std::fflush(nullptr);
+                TerminateProcess(GetCurrentProcess(), 5);
+            } else {
+                NXLOG_W("watchdog", "[diag] synthetic_dump = %s: no such report (freeze or device_lost)", synthetic.c_str());
+            }
+        }
         const double idle_s = std::chrono::duration<double>(now - last_change).count();
         if (!fired && idle_s >= c->threshold_s) {
             fired = true;
@@ -391,6 +416,19 @@ void run_loop(Control* c) {
 }
 
 }  // namespace
+
+std::string diag_memory_text(const char* when) { return memory_text(when && when[0] ? when : "the dump"); }
+
+std::string diag_full_dump(const char* header, const char* when) {
+    std::string text = header ? header : "";
+    text += '\n';
+    text += diag_vk_failure_text();
+    text += memory_text(when && when[0] ? when : "the dump");
+    text += dump_text();
+    text += kernel::sync_wait_report();
+    text += extra_reports();
+    return text;
+}
 
 void watchdog_start(const WatchdogOptions& opt) {
     Control& c = control();
