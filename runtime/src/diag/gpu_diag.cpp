@@ -120,6 +120,73 @@ std::string diag_vk_failure_text() {
     return out;
 }
 
+// ---- recent dispatches (the last-N ring) -----------------------------------------------------------------------------------
+// A fixed ring of the render thread's dispatches, always on ([diag] dispatch_ring picks how many a dump shows): the frame trace can
+// only be aimed at a frame that presents, so a GPU hang that stops the presents had nothing to aim at. The writer is one thread, so
+// each slot is a tiny seqlock: the reader retries when the writer changed the slot under it, and never blocks.
+constexpr size_t kDispatchSlots = 64;
+
+struct DispatchSlot {
+    std::atomic<uint64_t> seq{0};   // even: stable, odd: being written
+    DispatchNote note;
+};
+DispatchSlot g_dispatch[kDispatchSlots];
+std::atomic<uint64_t> g_dispatch_count{0};
+
+void diag_note_dispatch(const DispatchNote& note) {
+    static const bool registered = (diag_add_report(&diag_dispatch_text), true);   // the dumps flush the ring
+    const uint64_t n = g_dispatch_count.fetch_add(1, std::memory_order_relaxed) + 1;
+    DispatchSlot& s = g_dispatch[static_cast<size_t>((n - 1) % kDispatchSlots)];
+    DispatchNote t = note;
+    t.index = n;
+    const uint64_t v = s.seq.load(std::memory_order_relaxed);
+    s.seq.store(v + 1, std::memory_order_relaxed);   // odd: the slot is being written
+    s.note = t;
+    s.seq.store(v + 2, std::memory_order_release);   // even again: stable
+}
+
+bool dispatch_slot_read(const DispatchSlot& s, DispatchNote& out) {
+    for (int tries = 0; tries < 4; ++tries) {
+        const uint64_t v1 = s.seq.load(std::memory_order_acquire);
+        if (v1 & 1) continue;
+        out = s.note;
+        if (s.seq.load(std::memory_order_acquire) == v1) return true;
+    }
+    return false;
+}
+
+std::string diag_dispatch_text() {
+    const uint64_t total = g_dispatch_count.load(std::memory_order_relaxed);
+    if (total == 0) return "";   // no dispatches yet: nothing to say
+    int64_t depth = config_get_int("diag", "dispatch_ring", 64);
+    if (depth < 1) depth = 1;
+    if (depth > static_cast<int64_t>(kDispatchSlots)) depth = static_cast<int64_t>(kDispatchSlots);
+    const uint64_t first = total > static_cast<uint64_t>(depth) ? total - static_cast<uint64_t>(depth) + 1 : 1;
+    char b[192];
+    std::snprintf(b, sizeof b, "recent dispatches (last %llu of %llu, oldest first; [diag] dispatch_ring picks how many):\n",
+                  static_cast<unsigned long long>(total - first + 1), static_cast<unsigned long long>(total));
+    std::string out = b;
+    for (uint64_t i = first; i <= total; ++i) {
+        DispatchNote n;
+        if (!dispatch_slot_read(g_dispatch[static_cast<size_t>((i - 1) % kDispatchSlots)], n)) {
+            out += "  (a dispatch was being written; skipped)\n";
+            continue;
+        }
+        std::snprintf(b, sizeof b, "  #%llu  cs %s%s%s%s  %ux%ux%u  %s  barriers %u  bindings %u%s\n",
+                      static_cast<unsigned long long>(n.index),
+                      n.flags & DispatchNote::kMissingCs ? "-" : n.shader[0] ? n.shader : "-",
+                      n.flags & DispatchNote::kMissingCs && n.missing[0] ? " (missing " : "",
+                      n.flags & DispatchNote::kMissingCs && n.missing[0] ? n.missing : "",
+                      n.flags & DispatchNote::kMissingCs && n.missing[0] ? ")" : "",
+                      n.x, n.y, n.z,
+                      n.flags & DispatchNote::kIndirect ? "indirect" : "direct",
+                      n.barriers, n.bindings,
+                      n.flags & DispatchNote::kBarrierBefore ? " (a barrier before it, the compute-shadow copy-in)" : "");
+        out += b;
+    }
+    return out;
+}
+
 std::string diag_device_lost_dump(const char* where, int result, uint64_t frames, const std::string& context) {
     char b[640];
     std::snprintf(b, sizeof b,

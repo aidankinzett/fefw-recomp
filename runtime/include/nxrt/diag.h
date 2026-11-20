@@ -137,4 +137,23 @@ std::string diag_full_dump(const char* header, const char* when);
 std::string diag_device_lost_dump(const char* where, int result, uint64_t frames, const std::string& context);
 
 
+// One recent dispatch of the render thread: what a dispatch that hung the GPU looked like. Filled by the NVN back end's do_dispatch
+// (nvn_replay.cpp) into a fixed ring (gpu_diag.cpp) that the freeze and device-loss dumps flush; the frame trace cannot be aimed at a
+// frame that never presents, which is exactly the failure mode. The note is a plain copy, no allocation, no lock.
+struct DispatchNote {
+    static constexpr uint16_t kIndirect = 1, kMissingCs = 2, kBarrierBefore = 4;
+    char shader[17] = {};      // the compute shader's hash (16 hex chars), "" when the shader had no translation
+    char missing[17] = {};     // with kMissingCs: the cache keys SetShaders found no translation for
+    uint32_t x = 0, y = 0, z = 0;
+    uint64_t indirect = 0;     // the indirect arguments buffer address (0: a direct dispatch)
+    uint32_t bindings = 0;     // buffer and image bindings of the dispatch's layout
+    uint32_t barriers = 0;     // full barriers recorded in the command buffer since the previous dispatch
+    uint16_t flags = 0;
+    uint64_t index = 0;        // dispatch number since start (the dump shows "last N of M")
+};
+void diag_note_dispatch(const DispatchNote& note);
+// The ring as report text: "recent dispatches (last N of M, oldest first)", one line per dispatch, oldest first. Registered as an
+// extra report section on the first note, so the freeze and device-loss dumps flush it too.
+std::string diag_dispatch_text();
+
 }  // namespace nxrt
