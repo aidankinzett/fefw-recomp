@@ -8,6 +8,7 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -120,11 +121,22 @@ NXTEST(dispatch_ring_flushes_last_64) {
 }
 
 // The device-loss dump is the freeze dump's shape: the first failure, the memory figures, the thread dump and the
-// dispatch ring (flushed before teardown), all read from the same composers the watchdog uses.
+// dispatch ring (flushed before teardown), all read from the same composers the watchdog uses. The dump skips the
+// calling thread's own record, so the worker is registered on a separate thread that stays alive while it runs.
 NXTEST(device_lost_dump_carries_every_section) {
-    nxrt::diag_register_thread("gd-worker", nullptr, 1);
+    std::atomic<bool> registered{false};
+    std::atomic<bool> stop{false};
+    std::thread worker([&] {
+        nxrt::diag_register_thread("gd-worker", nullptr, 1);
+        registered.store(true, std::memory_order_release);
+        while (!stop.load(std::memory_order_relaxed)) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        nxrt::diag_unregister_thread();
+    });
+    while (!registered.load(std::memory_order_acquire)) std::this_thread::sleep_for(std::chrono::milliseconds(10));
     feed_dispatches(3);
     const std::string text = nxrt::diag_device_lost_dump("vkQueueSubmit2", -4, 5, "");
+    stop.store(true, std::memory_order_relaxed);
+    worker.join();
     CHECK_MSG(has(text, "GPU DEVICE LOST"), "the device-loss header missing");
     CHECK_MSG(has(text, "GPU first failure"), "the first-failure section missing");
     CHECK_MSG(has(text, "memory at device loss"), "the memory section missing");
@@ -132,7 +144,6 @@ NXTEST(device_lost_dump_carries_every_section) {
     CHECK_MSG(has(text, "kernel sync waiters"), "the guest sync wait section missing");
     CHECK_MSG(has(text, "recent dispatches"), "the dispatch ring missing");
     CHECK_MSG(has(text, "indirect args 0x1f2a9000"), "the newest indirect dispatch missing");
-    nxrt::diag_unregister_thread();
 }
 
 // The synthetic freeze dump: [diag] synthetic_dump = freeze writes the report once, without a real freeze, and the run
