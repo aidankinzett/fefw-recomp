@@ -11,6 +11,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <thread>
@@ -42,6 +44,12 @@ std::string read_file(const std::string& path) {
 
 bool has(const std::string& s, const char* sub) { return s.find(sub) != std::string::npos; }
 
+uint64_t parse_dispatch_total(const std::string& text) {
+    const size_t p = text.find(" of ");
+    if (p == std::string::npos) return 0;
+    return std::strtoull(text.c_str() + p + 4, nullptr, 10);
+}
+
 // A plausible stream of dispatches: one every 3 barriers, then an indirect one that hangs. Returns the number fed (the
 // process-wide ring counters are not readable from here, so the cases compare as deltas and look for the newest index
 // relative to the count this case fed).
@@ -52,6 +60,7 @@ uint64_t feed_dispatches(int count) {
         n.x = 240;
         n.y = 135;
         n.z = 1;
+        n.serial = 100ull + static_cast<uint64_t>(i);
         n.barriers = 3;
         n.bindings = 3;
         nxrt::diag_note_dispatch(n);
@@ -59,6 +68,7 @@ uint64_t feed_dispatches(int count) {
     nxrt::DispatchNote last;
     std::snprintf(last.shader, sizeof last.shader, "7c11be0099a4d2f1");
     last.indirect = 0x1f2a9000ull;
+    last.serial = 200ull;
     last.barriers = 21;
     last.bindings = 5;
     last.flags = nxrt::DispatchNote::kIndirect;
@@ -72,13 +82,18 @@ uint64_t feed_dispatches(int count) {
 // record: a real device loss would otherwise be reported as a timeout or a resize. This case runs first, so the
 // record it leaves behind proves the exclusion: a broken exclusion would have claimed the record with the resize.
 NXTEST(expected_results_do_not_claim_the_record) {
+    nxrt::diag_set_submit_state([]() -> std::string { return "NVN back end: last submitted serial 42, timeline value 40\n"; });
     nxrt::diag_vk_note(-1000001004, "vkAcquireNextImageKHR", __FILE__, __LINE__);   // VK_ERROR_OUT_OF_DATE_KHR: a resize
     nxrt::diag_vk_note(2, "wait_serial", __FILE__, __LINE__);                       // VK_TIMEOUT: a retry slice
     nxrt::diag_vk_note(1000001003, "vkQueuePresentKHR", __FILE__, __LINE__);        // VK_SUBOPTIMAL_KHR
     nxrt::diag_vk_note(-4, "vkQueueSubmit2", __FILE__, __LINE__);
+    nxrt::diag_set_submit_state(nullptr);
     const std::string text = nxrt::diag_vk_failure_text();
     CHECK_MSG(has(text, "vkQueueSubmit2"), "the real failure missing from the record");
     CHECK_MSG(has(text, "VK_ERROR_DEVICE_LOST"), "the real failure's result missing from the record");
+    CHECK_MSG(has(text, "submit state when it failed: NVN back end: last submitted serial 42, timeline value 40\n"),
+              "the submit state missing from the first-failure record");
+    CHECK_MSG(!has(text, "\n\n"), "a trailing newline from submit state produced a blank line");
     CHECK_MSG(!has(text, "vkAcquireNextImageKHR"), "a resize claimed the record");
     CHECK_MSG(!has(text, "wait_serial"), "a timeout slice claimed the record");
     CHECK_MSG(!has(text, "vkQueuePresentKHR"), "a suboptimal presentation claimed the record");
@@ -100,10 +115,12 @@ NXTEST(first_failure_is_not_displaced) {
 // The ring always keeps the last 64: after 70 more dispatches the dump shows the last 64 of the total, oldest first,
 // with the newest (the one that hung) at the end.
 NXTEST(dispatch_ring_flushes_last_64) {
+    const uint64_t before = parse_dispatch_total(nxrt::diag_dispatch_text());
     const uint64_t fed = feed_dispatches(70);
     const std::string text = nxrt::diag_dispatch_text();
     CHECK_MSG(has(text, "last 64 of "), "the ring did not show the last 64");
     CHECK_MSG(has(text, "7c11be0099a4d2f1"), "the hung compute shader missing from the dump");
+    CHECK_MSG(has(text, "submit 200"), "the submit serial missing from the dispatch line");
     CHECK_MSG(has(text, "indirect args 0x1f2a9000"), "the indirect dispatch's arguments address missing");
     CHECK_MSG(!has(text, "0x0x0"), "an indirect dispatch printed as direct dimensions");
     const size_t newest = text.rfind("7c11be0099a4d2f1");
@@ -113,11 +130,31 @@ NXTEST(dispatch_ring_flushes_last_64) {
     nxrt::config_set("diag", "dispatch_ring", "1");
     const std::string one = nxrt::diag_dispatch_text();
     char b[128];
-    std::snprintf(b, sizeof b, "last 1 of %llu", static_cast<unsigned long long>(fed));
+    std::snprintf(b, sizeof b, "last 1 of %llu", static_cast<unsigned long long>(before + fed));
     CHECK_MSG(has(one, b), "the depth config did not shrink the dump");
     CHECK_MSG(has(one, "7c11be0099a4d2f1"), "the newest dispatch missing at depth 1");
     CHECK_MSG(has(one, "  #"), "the newest dispatch line missing at depth 1");
     nxrt::config_set("diag", "dispatch_ring", "64");
+}
+
+// A dispatch whose compute shader had no translation is still recorded (with its missing cache key), and a long
+// indirect line with kBarrierBefore fits without truncating the trailing newline.
+NXTEST(missing_compute_shader_dispatch_is_noted) {
+    nxrt::DispatchNote n;
+    std::snprintf(n.missing, sizeof n.missing, "deadbeef12345678");
+    n.indirect = 0x00007123456789abull;
+    n.serial = 999999ull;
+    n.barriers = 12;
+    n.bindings = 7;
+    n.flags = nxrt::DispatchNote::kIndirect | nxrt::DispatchNote::kMissingCs | nxrt::DispatchNote::kBarrierBefore;
+    nxrt::diag_note_dispatch(n);
+    nxrt::config_set("diag", "dispatch_ring", "1");
+    const std::string text = nxrt::diag_dispatch_text();
+    nxrt::config_set("diag", "dispatch_ring", "64");
+    CHECK_MSG(has(text, "submit 999999"), "the submit serial missing from the missing-cs line");
+    CHECK_MSG(has(text, "cs - (missing deadbeef12345678)"), "the missing cache key not formatted");
+    CHECK_MSG(has(text, "indirect args 0x7123456789ab"), "the 64-bit indirect address missing");
+    CHECK_MSG(has(text, "(a barrier before it, the compute-shadow copy-in)\n"), "the barrier suffix or trailing newline was truncated");
 }
 
 // The device-loss dump is the freeze dump's shape: the first failure, the memory figures, the thread dump and the
@@ -174,4 +211,5 @@ NXTEST(synthetic_freeze_dump_writes_every_section) {
     CHECK_MSG(has(text, "recent dispatches"), "the dispatch ring missing");
     CHECK_MSG(has(text, "indirect args 0x1f2a9000"), "the newest indirect dispatch missing");
     nxrt::diag_unregister_thread();
+    std::remove(rep.c_str());
 }

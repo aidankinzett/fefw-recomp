@@ -46,7 +46,7 @@ VKAPI_ATTR VkResult VKAPI_CALL counted_allocate_memory(VkDevice d, const VkMemor
     static std::atomic<bool> injected{false};
     const bool fail = inject && !info->pNext && info->allocationSize <= 65536 && !injected.exchange(true);
     if (fail) NXLOG_W("vk.memory", "diagnostic small allocation failure injected");
-    const VkResult r = fail ? VK_ERROR_OUT_OF_DEVICE_MEMORY : NXRT_VK(driver_allocate_memory(d, info, cb, out));
+    const VkResult r = fail ? VK_ERROR_OUT_OF_DEVICE_MEMORY : driver_allocate_memory(d, info, cb, out);
     if (r == VK_SUCCESS) {
         std::lock_guard<std::mutex> lock(memory_count_mu);
         memory_sizes[*out] = info->allocationSize;
@@ -1174,7 +1174,7 @@ bool Device::image_supported(const ImageDesc& d, std::string* why) {
             info.usage = d.usage;
             info.flags = d.flags;
             VkImageFormatProperties2 out = {VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2};
-            val.result = NXRT_VK(vkGetPhysicalDeviceImageFormatProperties2(physical_, &info, &out));
+            val.result = vkGetPhysicalDeviceImageFormatProperties2(physical_, &info, &out);
             val.props = out.imageFormatProperties;
             impl_->fmt_checks++;
             impl_->fmt_cache.emplace(key, val);
@@ -1378,9 +1378,9 @@ bool Device::submit_once(const std::function<void(VkCommandBuffer)>& fn) {
     vk_gauge_command_buffers().add(1);
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(cmd, &bi);
+    NXRT_VK(vkBeginCommandBuffer(cmd, &bi));
     fn(cmd);
-    vkEndCommandBuffer(cmd);
+    NXRT_VK(vkEndCommandBuffer(cmd));
     VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cmd;
@@ -1390,7 +1390,7 @@ bool Device::submit_once(const std::function<void(VkCommandBuffer)>& fn) {
         ok = NXRT_VK(vkQueueSubmit(queue_, 1, &si, impl_->once_fence)) == VK_SUCCESS;
     }
     if (ok) ok = NXRT_VK(vkWaitForFences(device_, 1, &impl_->once_fence, VK_TRUE, UINT64_MAX)) == VK_SUCCESS;
-    vkResetFences(device_, 1, &impl_->once_fence);
+    NXRT_VK(vkResetFences(device_, 1, &impl_->once_fence));
     vkFreeCommandBuffers(device_, impl_->once_pool, 1, &cmd);
     vk_gauge_command_buffers().sub(1);
     return ok;
@@ -1398,7 +1398,7 @@ bool Device::submit_once(const std::function<void(VkCommandBuffer)>& fn) {
 
 void Device::wait_idle() {
     std::lock_guard<std::mutex> ql(queue_mutex_);
-    vkDeviceWaitIdle(device_);
+    NXRT_VK(vkDeviceWaitIdle(device_));
 }
 
 Device::MemoryStats Device::memory_stats() {

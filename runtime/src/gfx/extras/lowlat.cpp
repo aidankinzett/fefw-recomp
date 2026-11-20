@@ -334,7 +334,7 @@ void LowLatency::sim_begin() {
             wi.semaphoreCount = 1;
             wi.pSemaphores = &s.sleep_sem;
             wi.pValues = &si.value;
-            vkWaitSemaphores(s.dev->device(), &wi, 100ull * 1000 * 1000);   // never longer than 100 ms, whatever the driver does
+            NXRT_VK(vkWaitSemaphores(s.dev->device(), &wi, 100ull * 1000 * 1000));   // never longer than 100 ms, whatever the driver does
         }
     } else if (s.antilag && s.live_on) {
         s.antilag_update(VK_ANTI_LAG_STAGE_INPUT_AMD, id);

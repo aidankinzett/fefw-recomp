@@ -217,6 +217,8 @@ bool import_range(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size, const c
     VkResult r;
     const auto tm0 = std::chrono::steady_clock::now();
     { NXFT("pool.hostprops"); r = vkGetMemoryHostPointerPropertiesEXT(dev.device(), VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, import_ptr, &hp); }
+    if (r != VK_SUCCESS && r != VK_ERROR_INVALID_EXTERNAL_HANDLE)
+        diag_vk_note(static_cast<int>(r), "vkGetMemoryHostPointerPropertiesEXT(dev.device(), VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, import_ptr, &hp)", __FILE__, __LINE__);
     if (r != VK_SUCCESS || !hp.memoryTypeBits) {
         NXLOG_E(kTag, "vkGetMemoryHostPointerPropertiesEXT failed (%d) for %p (%s %zu of %zu)", static_cast<int>(r), reinterpret_cast<void*>(start), what, index, count);
         c.failed = true;
@@ -258,7 +260,11 @@ bool import_range(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size, const c
             r = VK_ERROR_INVALID_EXTERNAL_HANDLE;
             if (!pressure || log_rate(g_log_headroom))
                 NXLOG_W(kTag, "host import skipped (%s)", pressure ? "allocation headroom" : "diagnostic fault injection");
-        } else r = vkAllocateMemory(dev.device(), &mai, nullptr, &c.mem);
+        } else {
+            r = vkAllocateMemory(dev.device(), &mai, nullptr, &c.mem);
+            if (r != VK_SUCCESS && r != VK_ERROR_INVALID_EXTERNAL_HANDLE)
+                diag_vk_note(static_cast<int>(r), "vkAllocateMemory(dev.device(), &mai, nullptr, &c.mem)", __FILE__, __LINE__);
+        }
     }
     const auto tm2 = std::chrono::steady_clock::now();
     if (r != VK_SUCCESS) {
@@ -271,7 +277,7 @@ bool import_range(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size, const c
         return false;
     }
     freeze.reset();
-    if (r == VK_SUCCESS) r = vkBindBufferMemory(dev.device(), c.buffer, c.mem, 0);
+    if (r == VK_SUCCESS) r = NXRT_VK(vkBindBufferMemory(dev.device(), c.buffer, c.mem, 0));
     if (r != VK_SUCCESS) {
         NXLOG_E(kTag, "buffer over pool %p %s %zu of %zu failed (%d)", static_cast<void*>(g->base), what, index, count, static_cast<int>(r));
         c.failed = true;

@@ -4374,6 +4374,27 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     const ShaderInfo* cs = S.stage[kCompute];
     TRACE("dispatch %u %u %u indirect %llx cs %s%s%s", x, y, z, static_cast<unsigned long long>(indirect), cs ? cs->hash.c_str() : "-",
           !cs && !g_cs_missing.empty() ? " missing " : "", !cs ? g_cs_missing.c_str() : "");
+    static uint64_t s_cb_gen = 0;
+    static uint64_t s_cb_mark = 0;
+    auto take_barriers = []() -> uint32_t {
+        uint64_t gen = 0;
+        const uint64_t mark = command_buffer_barriers(&gen);
+        const uint64_t delta = gen == s_cb_gen ? (mark - s_cb_mark) : mark;
+        s_cb_gen = gen;
+        s_cb_mark = mark;
+        return static_cast<uint32_t>(delta);
+    };
+    if (!cs) {
+        nxrt::DispatchNote n;
+        if (!g_cs_missing.empty()) std::memcpy(n.missing, g_cs_missing.c_str(), std::min(g_cs_missing.size(), sizeof n.missing - 1));
+        n.x = x; n.y = y; n.z = z;
+        n.indirect = indirect;
+        n.serial = F ? F->serial : 0;
+        n.barriers = take_barriers();
+        n.flags = nxrt::DispatchNote::kMissingCs | (indirect ? nxrt::DispatchNote::kIndirect : 0);
+        nxrt::diag_note_dispatch(n);
+        return;
+    }
     const ShaderInfo* stages[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, cs};
     const ProgLayout* pl = layout_cached(stages);
     if (!pl) return;
@@ -4461,21 +4482,18 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
         memory_barrier(F->cb);     // the copies into the shadows before the dispatch reads them
         gstamp("shadow in");
     }
+    cs_before_dispatch(*pl, indirect);
     {   // The dispatch ring (gpu_diag.cpp): what the last dispatches looked like, flushed by the dumps when a GPU hang has no trace.
-        static VkCommandBuffer s_cb = nullptr;
-        static uint64_t s_mark = 0;
-        const uint64_t mark = memory_barrier_count(F->cb);
         nxrt::DispatchNote n;
         std::memcpy(n.shader, cs->hash.c_str(), std::min(cs->hash.size(), sizeof n.shader - 1));
         n.x = x; n.y = y; n.z = z;
         n.indirect = indirect;
+        n.serial = F ? F->serial : 0;
         n.bindings = static_cast<uint32_t>(pl->bindings.size());
-        n.barriers = F->cb == s_cb ? static_cast<uint32_t>(mark - s_mark) : 0;
+        n.barriers = take_barriers();
         n.flags = (indirect ? nxrt::DispatchNote::kIndirect : 0) | (g_sh_barrier ? nxrt::DispatchNote::kBarrierBefore : 0);
         nxrt::diag_note_dispatch(n);
-        s_cb = F->cb; s_mark = mark;
     }
-    cs_before_dispatch(*pl, indirect);
     if (indirect) {
         vkCmdDispatchIndirect(F->cb, ind.buffer, ind.offset);
     } else {

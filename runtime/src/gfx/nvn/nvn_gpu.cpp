@@ -190,7 +190,7 @@ std::condition_variable g_copy_done_cv;
 
 uint64_t read_completed() {
     uint64_t v = 0;
-    if (g && g->timeline) vkGetSemaphoreCounterValue(g->dev->device(), g->timeline, &v);
+    if (g && g->timeline) NXRT_VK(vkGetSemaphoreCounterValue(g->dev->device(), g->timeline, &v));
     const uint64_t copying = g_copy_inflight.load();
     if (copying && v >= copying) v = copying - 1;
     if (v > g->completed.load()) g->completed.store(v);
@@ -369,7 +369,7 @@ void flush_batch() {
         VkSemaphoreSignalInfo ssi = {VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO};
         ssi.semaphore = g->timeline;
         ssi.value = serial;
-        vkSignalSemaphore(g->dev->device(), &ssi);
+        NXRT_VK(vkSignalSemaphore(g->dev->device(), &ssi));
     }
     g->flushed = serial;
     g->flushed_pub.store(serial);
@@ -378,6 +378,9 @@ void flush_batch() {
 }
 
 std::atomic<uint64_t> g_splits{0};
+thread_local uint64_t t_cb_barriers = 0;   // full memory barriers in the command buffer currently open on this thread
+thread_local uint64_t t_cb_gen = 0;        // monotonic id of the current command buffer recording (changes at every vkBeginCommandBuffer)
+void note_begin_cb() { t_cb_barriers = 0; ++t_cb_gen; }
 
 }  // namespace
 
@@ -421,7 +424,8 @@ bool split_submission(Frame& f) {
     s.split_used.push_back(s.cb);
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(next, &bi);
+    NXRT_VK(vkBeginCommandBuffer(next, &bi));
+    note_begin_cb();
     s.cb = next;
     f.cb = next;
     g->ctr.submits.fetch_add(1);
@@ -576,7 +580,7 @@ Slot& acquire_slot() {
     s.gp_n = 0;
     s.gp_labels.clear();
     retire();
-    vkResetCommandPool(g->dev->device(), s.pool, 0);
+    NXRT_VK(vkResetCommandPool(g->dev->device(), s.pool, 0));
     if (!s.split_used.empty()) {     // the reset made them free again; the slot's own cb is whichever was current at the end
         s.split_free.insert(s.split_free.end(), s.split_used.begin(), s.split_used.end());
         s.split_used.clear();
@@ -719,13 +723,16 @@ VkDescriptorSet Frame::alloc_set(VkDescriptorSetLayout layout) {
         ai.descriptorSetCount = 1;
         ai.pSetLayouts = &layout;
         VkDescriptorSet set = VK_NULL_HANDLE;
-        const VkResult r = NXRT_VK(vkAllocateDescriptorSets(g->dev->device(), &ai, &set));
+        const VkResult r = vkAllocateDescriptorSets(g->dev->device(), &ai, &set);
         if (r == VK_SUCCESS) {
             g->ctr.descriptor_sets.fetch_add(1, std::memory_order_relaxed);
             s.sets_live++;
             vk_gauge_descriptor_sets().add(1);
             return set;
         }
+        // Pool exhaustion/fragmentation on the first attempt is normal growth (the next pool is created on demand); anything else is recorded.
+        if (attempt > 0 || (r != VK_ERROR_OUT_OF_POOL_MEMORY && r != VK_ERROR_FRAGMENTED_POOL))
+            diag_vk_note(static_cast<int>(r), "vkAllocateDescriptorSets(g->dev->device(), &ai, &set)", __FILE__, __LINE__);
         ++s.dpool_cur;   // exhausted or fragmented: move on to the next pool (created on demand)
     }
     return VK_NULL_HANDLE;
@@ -882,9 +889,15 @@ uint64_t memory_barrier_count(VkCommandBuffer cb) {
     return it == t_barriers_in_cb.end() ? 0 : it->second;
 }
 
+uint64_t command_buffer_barriers(uint64_t* gen) {
+    if (gen) *gen = t_cb_gen;
+    return t_cb_barriers;
+}
+
 void memory_barrier(VkCommandBuffer cb) {
     g_gauge_barriers_mem.add(1);
     ++t_barriers_in_cb[cb];
+    ++t_cb_barriers;
     VkMemoryBarrier2 b = {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
     b.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
     b.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
@@ -921,7 +934,8 @@ uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint
     f.split_ok = !unsignalled;
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(s.cb, &bi);
+    NXRT_VK(vkBeginCommandBuffer(s.cb, &bi));
+    note_begin_cb();
     // [nvn] replay_threads = 2: from here to vkEndCommandBuffer the Vulkan calls of this thread are made by the worker (nvn_cmdq.h)
     std::optional<cmdq::Scope> qscope;
     qscope.emplace();
@@ -951,15 +965,16 @@ uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint
         replay_abort_submit();
         if (!s.split_used.empty()) {     // parts already handed to the GPU must finish before their pool is reset
             std::lock_guard<std::mutex> lk(g->dev->queue_mutex());
-            vkQueueWaitIdle(g->dev->queue());
+            NXRT_VK(vkQueueWaitIdle(g->dev->queue()));
         }
-        vkResetCommandPool(g->dev->device(), s.pool, 0);
+        NXRT_VK(vkResetCommandPool(g->dev->device(), s.pool, 0));
         if (!s.split_used.empty()) {
             s.split_free.insert(s.split_free.end(), s.split_used.begin(), s.split_used.end());
             s.split_used.clear();
         }
         f.cb = s.cb;
-        vkBeginCommandBuffer(s.cb, &bi);
+        NXRT_VK(vkBeginCommandBuffer(s.cb, &bi));
+        note_begin_cb();
         s.timed = false;
         s.gp_n = 0;
         s.gp_labels.clear();
@@ -968,7 +983,7 @@ uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint
     if (g->gpool && !aborted) gpass_stamp(f, "tail", 0);
     if (g->qpool && !aborted) vkCmdWriteTimestamp(s.cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g->qpool, qi + 1);
     qscope.reset();       // every queued call made
-    vkEndCommandBuffer(s.cb);
+    NXRT_VK(vkEndCommandBuffer(s.cb));
     if (!unsignalled) {
         s.serial = serial;
         g->submitted = serial;
@@ -1002,7 +1017,7 @@ uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint
         std::lock_guard<std::mutex> lk(g->dev->queue_mutex());
         nxrt::hitch_phase_add(nxrt::kHpRenderLockWait, nxrt::hitch_ticks() - tl);
         r = NXRT_VK(vkQueueSubmit2(g->dev->queue(), 1, &si, VK_NULL_HANDLE));
-        if (r == VK_SUCCESS) vkQueueWaitIdle(g->dev->queue());   // nothing else tells when it is done
+        if (r == VK_SUCCESS) NXRT_VK(vkQueueWaitIdle(g->dev->queue()));   // nothing else tells when it is done
     }
     if (pool_copy_pending()) pool_copy_end();
     g->recording = 0;
@@ -1035,7 +1050,7 @@ void present_batch_done(const gfx::Renderer::SubmitPrefix& p) {
         VkSemaphoreSignalInfo ssi = {VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO};
         ssi.semaphore = g->timeline;
         ssi.value = p.value;
-        vkSignalSemaphore(g->dev->device(), &ssi);
+        NXRT_VK(vkSignalSemaphore(g->dev->device(), &ssi));
     }
     g->flushed = p.value;
     g->flushed_pub.store(p.value);
@@ -1541,7 +1556,7 @@ void tear_down() {
     if (gp->th.joinable()) gp->th.join();
     cmdq::shutdown();
     gfx::Device& d = *gp->dev;
-    vkDeviceWaitIdle(d.device());
+    NXRT_VK(vkDeviceWaitIdle(d.device()));
     if (gp->ring.buf.buffer) d.destroy_buffer(gp->ring.buf);
     for (Slot& s : gp->slots) {
         for (auto& b : s.extra) d.destroy_buffer(b);

@@ -116,8 +116,11 @@ void diag_vk_note(int result, const char* call, const char* file, int line) {
     std::snprintf(f.thread, sizeof f.thread, "%s", tn && tn[0] ? tn : "(unnamed)");
     f.ms = ms_since_start();
     f.frames = diag_frame_count();
-    if (auto fn = g_submit_state.load(std::memory_order_acquire))
-        if (const std::string s = fn(); !s.empty()) std::snprintf(f.submit, sizeof f.submit, "%s", s.c_str());
+    if (auto fn = g_submit_state.load(std::memory_order_acquire)) {
+        std::string s = fn();
+        while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+        if (!s.empty()) std::snprintf(f.submit, sizeof f.submit, "%s", s.c_str());
+    }
     g_vk_state.store(kVkRecorded, std::memory_order_release);
     NXLOG_E("gpu", "first Vulkan failure: %s (%d) from %s at %s:%d on thread %s (tid %lu), %.3f s in, %llu frames presented%s%s", result_name(result),
             result, f.call, file_name(f.file), f.line, f.thread, static_cast<unsigned long>(f.tid), static_cast<double>(f.ms) / 1000.0,
@@ -163,14 +166,18 @@ std::atomic<uint64_t> g_dispatch_count{0};
 
 void diag_note_dispatch(const DispatchNote& note) {
     static const bool registered = (diag_add_report(&diag_dispatch_text), true);   // the dumps flush the ring
-    const uint64_t n = g_dispatch_count.fetch_add(1, std::memory_order_relaxed) + 1;
+    const uint64_t n = g_dispatch_count.load(std::memory_order_relaxed) + 1;
     DispatchSlot& s = g_dispatch[static_cast<size_t>((n - 1) % kDispatchSlots)];
     DispatchNote t = note;
     t.index = n;
     uint8_t expected = 0;
-    while (!s.held.compare_exchange_weak(expected, 1, std::memory_order_acquire)) expected = 0;   // a dump reader holds it: one payload copy
+    while (!s.held.compare_exchange_weak(expected, 1, std::memory_order_acquire)) {   // a dump reader holds it: one payload copy
+        expected = 0;
+        YieldProcessor();
+    }
     s.note = t;
     s.held.store(0, std::memory_order_release);
+    g_dispatch_count.store(n, std::memory_order_release);   // published only after the slot holds the note
 }
 
 bool dispatch_slot_read(DispatchSlot& s, DispatchNote& out) {
@@ -182,13 +189,13 @@ bool dispatch_slot_read(DispatchSlot& s, DispatchNote& out) {
 }
 
 std::string diag_dispatch_text() {
-    const uint64_t total = g_dispatch_count.load(std::memory_order_relaxed);
+    const uint64_t total = g_dispatch_count.load(std::memory_order_acquire);
     if (total == 0) return "";   // no dispatches yet: nothing to say
     int64_t depth = config_get_int("diag", "dispatch_ring", 64);
     if (depth < 1) depth = 1;
     if (depth > static_cast<int64_t>(kDispatchSlots)) depth = static_cast<int64_t>(kDispatchSlots);
     const uint64_t first = total > static_cast<uint64_t>(depth) ? total - static_cast<uint64_t>(depth) + 1 : 1;
-    char b[192];
+    char b[320];
     std::snprintf(b, sizeof b, "recent dispatches (last %llu of %llu, oldest first; [diag] dispatch_ring picks how many):\n",
                   static_cast<unsigned long long>(total - first + 1), static_cast<unsigned long long>(total));
     std::string out = b;
@@ -198,9 +205,15 @@ std::string diag_dispatch_text() {
             out += "  (a dispatch was being written; skipped)\n";
             continue;
         }
+        if (n.index != i) {
+            out += "  (a dispatch was overwritten while reading; skipped)\n";
+            continue;
+        }
+        char ser[32] = {};
+        if (n.serial) std::snprintf(ser, sizeof ser, "  submit %llu", static_cast<unsigned long long>(n.serial));
         if (n.flags & DispatchNote::kIndirect) {
-            std::snprintf(b, sizeof b, "  #%llu  cs %s%s%s%s  indirect args 0x%llx (dimensions unknown)  barriers %u  bindings %u%s\n",
-                          static_cast<unsigned long long>(n.index),
+            std::snprintf(b, sizeof b, "  #%llu%s  cs %s%s%s%s  indirect args 0x%llx (dimensions unknown)  barriers %u  bindings %u%s\n",
+                          static_cast<unsigned long long>(n.index), ser,
                           n.flags & DispatchNote::kMissingCs ? "-" : n.shader[0] ? n.shader : "-",
                           n.flags & DispatchNote::kMissingCs && n.missing[0] ? " (missing " : "",
                           n.flags & DispatchNote::kMissingCs && n.missing[0] ? n.missing : "",
@@ -209,8 +222,8 @@ std::string diag_dispatch_text() {
                           n.barriers, n.bindings,
                           n.flags & DispatchNote::kBarrierBefore ? " (a barrier before it, the compute-shadow copy-in)" : "");
         } else {
-            std::snprintf(b, sizeof b, "  #%llu  cs %s%s%s%s  %ux%ux%u  direct  barriers %u  bindings %u%s\n",
-                          static_cast<unsigned long long>(n.index),
+            std::snprintf(b, sizeof b, "  #%llu%s  cs %s%s%s%s  %ux%ux%u  direct  barriers %u  bindings %u%s\n",
+                          static_cast<unsigned long long>(n.index), ser,
                           n.flags & DispatchNote::kMissingCs ? "-" : n.shader[0] ? n.shader : "-",
                           n.flags & DispatchNote::kMissingCs && n.missing[0] ? " (missing " : "",
                           n.flags & DispatchNote::kMissingCs && n.missing[0] ? n.missing : "",

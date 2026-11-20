@@ -131,10 +131,10 @@ void ensure_cache() {
     VkPipelineCacheCreateInfo ci = {VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
     ci.initialDataSize = data.size();
     ci.pInitialData = data.empty() ? nullptr : data.data();
-    if (NXRT_VK(vkCreatePipelineCache(vkdev(), &ci, nullptr, &g_cache)) != VK_SUCCESS) {
+    if (vkCreatePipelineCache(vkdev(), &ci, nullptr, &g_cache) != VK_SUCCESS) {
         ci.initialDataSize = 0;
         ci.pInitialData = nullptr;
-        vkCreatePipelineCache(vkdev(), &ci, nullptr, &g_cache);
+        NXRT_VK(vkCreatePipelineCache(vkdev(), &ci, nullptr, &g_cache));
     } else if (!data.empty()) {
         NXLOG_I(kTag, "pipeline cache loaded: %zu bytes from %s", data.size(), g_cache_path.c_str());
     }

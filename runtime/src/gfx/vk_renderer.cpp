@@ -805,7 +805,9 @@ bool Renderer::begin_frame(FrameInfo* out) {
     if (s.headless) {
         idx = static_cast<uint32_t>(s.frame_number % s.targets.size());
     } else {
-        VkResult r = NXRT_VK(vkAcquireNextImageKHR(s.vk(), s.swapchain, kFrameWaitNs, slot.acquire, VK_NULL_HANDLE, &idx));
+        VkResult r = vkAcquireNextImageKHR(s.vk(), s.swapchain, kFrameWaitNs, slot.acquire, VK_NULL_HANDLE, &idx);
+        if (r != VK_SUCCESS && r != VK_ERROR_SURFACE_LOST_KHR)
+            diag_vk_note(static_cast<int>(r), "vkAcquireNextImageKHR(s.vk(), s.swapchain, kFrameWaitNs, slot.acquire, VK_NULL_HANDLE, &idx)", __FILE__, __LINE__);
         if (r == VK_TIMEOUT || r == VK_NOT_READY) {
             s.stalled("a swapchain image");
             return false;
@@ -827,11 +829,11 @@ bool Renderer::begin_frame(FrameInfo* out) {
         }
     }
     s.stalls = 0;
-    vkResetFences(s.vk(), 1, &slot.fence);
-    vkResetCommandPool(s.vk(), slot.pool, 0);
+    NXRT_VK(vkResetFences(s.vk(), 1, &slot.fence));
+    NXRT_VK(vkResetCommandPool(s.vk(), slot.pool, 0));
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(slot.cmd, &bi);
+    NXRT_VK(vkBeginCommandBuffer(slot.cmd, &bi));
     if (slot.queries) {
         vkCmdResetQueryPool(slot.cmd, slot.queries, 0, 2);
         vkCmdWriteTimestamp2(slot.cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, slot.queries, 0);
@@ -893,7 +895,7 @@ void Renderer::end_frame(SubmitPrefix* prefix) {
         vkCmdWriteTimestamp2(slot.cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, slot.queries, 1);
         slot.ts_pending = true;
     }
-    vkEndCommandBuffer(slot.cmd);
+    NXRT_VK(vkEndCommandBuffer(slot.cmd));
 
     VkSemaphoreSubmitInfo wait = {VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
     wait.semaphore = slot.acquire;
@@ -981,7 +983,9 @@ void Renderer::end_frame(SubmitPrefix* prefix) {
                 pid.pPresentIds = &present_id;
                 pi.pNext = &pid;
             }
-            r = NXRT_VK(vkQueuePresentKHR(s.dev->queue(), &pi));
+            r = vkQueuePresentKHR(s.dev->queue(), &pi);
+            if (r != VK_SUCCESS && r != VK_ERROR_SURFACE_LOST_KHR)
+                diag_vk_note(static_cast<int>(r), "vkQueuePresentKHR(s.dev->queue(), &pi)", __FILE__, __LINE__);
             if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) {
                 // A present that failed is not a frame on the display: counting every call as a present made a black window
                 // report 60 fps of presents while nothing reached the screen (presents_failed keeps the other results).
@@ -1029,7 +1033,7 @@ void Renderer::end_frame(SubmitPrefix* prefix) {
     s.cur_slot = (s.cur_slot + 1) % static_cast<uint32_t>(s.slots.size());
 
     if (cap) {
-        vkWaitForFences(s.vk(), 1, &slot.fence, VK_TRUE, UINT64_MAX);
+        NXRT_VK(vkWaitForFences(s.vk(), 1, &slot.fence, VK_TRUE, UINT64_MAX));
         std::vector<uint8_t> raw(static_cast<size_t>(w) * h * bpp);
         s.dev->invalidate_buffer(cap);
         std::memcpy(raw.data(), cap.mapped, raw.size());

@@ -148,6 +148,7 @@ struct DispatchNote {
     char missing[17] = {};     // with kMissingCs: the cache keys SetShaders found no translation for
     uint32_t x = 0, y = 0, z = 0;
     uint64_t indirect = 0;     // the indirect arguments buffer address (0: a direct dispatch)
+    uint64_t serial = 0;       // submission serial (0: unknown / test)
     uint32_t bindings = 0;     // buffer and image bindings of the dispatch's layout
     uint32_t barriers = 0;     // full barriers recorded in the command buffer since the previous dispatch
     uint16_t flags = 0;

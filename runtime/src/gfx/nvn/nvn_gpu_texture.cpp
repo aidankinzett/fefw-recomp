@@ -459,7 +459,7 @@ bool sparse_flush_binds(TexGpu& g) {
         std::lock_guard<std::mutex> lk(device().queue_mutex());
         r = NXRT_VK(vkQueueBindSparse(device().queue(), 1, &bi, fence));
     }
-    if (r == VK_SUCCESS) r = vkWaitForFences(vkdev(), 1, &fence, VK_TRUE, UINT64_MAX);
+    if (r == VK_SUCCESS) r = NXRT_VK(vkWaitForFences(vkdev(), 1, &fence, VK_TRUE, UINT64_MAX));
     vkDestroyFence(vkdev(), fence, nullptr);
     sp.binds.clear();
     sp.opaque.clear();

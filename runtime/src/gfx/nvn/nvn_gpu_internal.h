@@ -121,6 +121,8 @@ void image_barrier(VkCommandBuffer cb, VkImage image, VkImageLayout from, VkImag
 void memory_barrier(VkCommandBuffer cb);
 // Full memory barriers this thread recorded into `cb` so far: a change since a point in its recording means one lies between.
 uint64_t memory_barrier_count(VkCommandBuffer cb);
+// Full memory barriers recorded into the command buffer currently open on this thread (resets at each vkBeginCommandBuffer); *gen changes on each new recording.
+uint64_t command_buffer_barriers(uint64_t* gen = nullptr);
 // [nvn] pass_barriers = tracked (S38): image_barrier derives its stage and access masks from the two layouts instead of all commands and
 // all memory. Set by the replay for each submission; any thread may record image barriers, so it is an atomic.
 void set_narrow_barriers(bool on);

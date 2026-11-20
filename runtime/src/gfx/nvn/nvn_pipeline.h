@@ -15,6 +15,7 @@
 
 #include <volk.h>
 
+#include "nxrt/diag.h"
 #include "nxrt/gauge.h"
 #include "nxrt/nvn_backend.h"
 
@@ -315,7 +316,7 @@ inline VkResult create_graphics_pipeline_tracked(VkDevice dev, VkPipelineCache c
     if (gi->stageCount) stages.assign(gi->pStages, gi->pStages + gi->stageCount);
     for (size_t i = 0; i < stages.size(); ++i) configure_guest_subgroup(stages[i], sizes[i]);
     info.pStages = stages.data();
-    const VkResult r = vkCreateGraphicsPipelines(dev, cache, 1, &info, nullptr, out);
+    const VkResult r = NXRT_VK(vkCreateGraphicsPipelines(dev, cache, 1, &info, nullptr, out));
     if (nxrt::hitch_on_render_thread()) nxrt::hitch_phase_add(nxrt::kHpRenderPipeline, nxrt::hitch_ticks() - t0);
     compiles_in_flight().fetch_sub(1, std::memory_order_relaxed);
     return r;
