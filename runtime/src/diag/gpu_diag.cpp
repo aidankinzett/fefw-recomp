@@ -46,13 +46,38 @@ const char* result_name(int r) {
         case -10: return "VK_ERROR_TOO_MANY_OBJECTS";
         case -11: return "VK_ERROR_FORMAT_NOT_SUPPORTED";
         case -12: return "VK_ERROR_FRAGMENTED_POOL";
+        case -13: return "VK_ERROR_UNKNOWN";
         case -1000000000: return "VK_ERROR_SURFACE_LOST_KHR";
         case -1000000001: return "VK_ERROR_NATIVE_WINDOW_IN_USE_KHR";
         case -1000001004: return "VK_ERROR_OUT_OF_DATE_KHR";
-        case -1000003001: return "VK_ERROR_SUBOPTIMAL_KHR";
-        case -1000011001: return "VK_ERROR_OUT_OF_POOL_MEMORY";
-        case -1000012000: return "VK_ERROR_INVALID_EXTERNAL_HANDLE";
+        case -1000011001: return "VK_ERROR_VALIDATION_FAILED_EXT";
+        case -1000012000: return "VK_ERROR_INVALID_SHADER_NV";
+        case -1000069000: return "VK_ERROR_OUT_OF_POOL_MEMORY";
+        case -1000072003: return "VK_ERROR_INVALID_EXTERNAL_HANDLE";
+        case -1000161000: return "VK_ERROR_FRAGMENTATION";
+        case -1000174001: return "VK_ERROR_NOT_PERMITTED_KHR";
+        case -1000255000: return "VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT";
+        case -1000257000: return "VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS";
+        case 1000001003: return "VK_SUBOPTIMAL_KHR";
+        case 1000297000: return "VK_PIPELINE_COMPILE_REQUIRED_EXT";
         default: return "VK_ERROR";
+    }
+}
+
+// Results a healthy run produces on purpose: wait_serial() retries VK_TIMEOUT in slices, the swapchain loop retries VK_NOT_READY,
+// vkEnumerate/vkGet* report VK_INCOMPLETE when the output array was full, and the presentation engine hands back
+// VK_SUBOPTIMAL_KHR and VK_ERROR_OUT_OF_DATE_KHR on every resize. None of them is a failure, so they must not claim the
+// first-failure record: a real device loss would otherwise be reported as a timeout or a resize.
+bool result_expected(int r) {
+    switch (r) {
+        case 1:      // VK_NOT_READY
+        case 2:      // VK_TIMEOUT
+        case 5:      // VK_INCOMPLETE
+        case 1000001003:   // VK_SUBOPTIMAL_KHR
+        case -1000001004:  // VK_ERROR_OUT_OF_DATE_KHR
+            return true;
+        default:
+            return false;
     }
 }
 
@@ -78,6 +103,7 @@ std::atomic<std::string (*)()> g_submit_state{nullptr};
 }  // namespace
 
 void diag_vk_note(int result, const char* call, const char* file, int line) {
+    if (result_expected(result)) return;   // a healthy run produces these on purpose: not a failure
     int expected = kVkNone;
     if (!g_vk_state.compare_exchange_strong(expected, kVkWriting)) return;   // the first failure is the one that is kept
     FirstFailure& f = g_first;
@@ -122,12 +148,14 @@ std::string diag_vk_failure_text() {
 
 // ---- recent dispatches (the last-N ring) -----------------------------------------------------------------------------------
 // A fixed ring of the render thread's dispatches, always on ([diag] dispatch_ring picks how many a dump shows): the frame trace can
-// only be aimed at a frame that presents, so a GPU hang that stops the presents had nothing to aim at. The writer is one thread, so
-// each slot is a tiny seqlock: the reader retries when the writer changed the slot under it, and never blocks.
+// only be aimed at a frame that presents, so a GPU hang that stops the presents had nothing to aim at. The writer is one thread; each
+// slot is guarded by a one-byte spin flag the writer takes and releases, so the payload copy is never concurrent with a read. The
+// reader (report code only) tries the flag once and skips the slot when it is held: it never blocks the render thread, and the writer
+// only ever waits for a dump reader, which holds the flag for one payload copy and only while a report is being written.
 constexpr size_t kDispatchSlots = 64;
 
 struct DispatchSlot {
-    std::atomic<uint64_t> seq{0};   // even: stable, odd: being written
+    std::atomic<uint8_t> held{0};   // flag the writer holds while the payload changes
     DispatchNote note;
 };
 DispatchSlot g_dispatch[kDispatchSlots];
@@ -139,20 +167,18 @@ void diag_note_dispatch(const DispatchNote& note) {
     DispatchSlot& s = g_dispatch[static_cast<size_t>((n - 1) % kDispatchSlots)];
     DispatchNote t = note;
     t.index = n;
-    const uint64_t v = s.seq.load(std::memory_order_relaxed);
-    s.seq.store(v + 1, std::memory_order_relaxed);   // odd: the slot is being written
+    uint8_t expected = 0;
+    while (!s.held.compare_exchange_weak(expected, 1, std::memory_order_acquire)) expected = 0;   // a dump reader holds it: one payload copy
     s.note = t;
-    s.seq.store(v + 2, std::memory_order_release);   // even again: stable
+    s.held.store(0, std::memory_order_release);
 }
 
-bool dispatch_slot_read(const DispatchSlot& s, DispatchNote& out) {
-    for (int tries = 0; tries < 4; ++tries) {
-        const uint64_t v1 = s.seq.load(std::memory_order_acquire);
-        if (v1 & 1) continue;
-        out = s.note;
-        if (s.seq.load(std::memory_order_acquire) == v1) return true;
-    }
-    return false;
+bool dispatch_slot_read(DispatchSlot& s, DispatchNote& out) {
+    uint8_t expected = 0;
+    if (!s.held.compare_exchange_strong(expected, 1, std::memory_order_acquire)) return false;   // the render thread is writing it: skip
+    out = s.note;
+    s.held.store(0, std::memory_order_release);
+    return true;
 }
 
 std::string diag_dispatch_text() {
@@ -172,16 +198,27 @@ std::string diag_dispatch_text() {
             out += "  (a dispatch was being written; skipped)\n";
             continue;
         }
-        std::snprintf(b, sizeof b, "  #%llu  cs %s%s%s%s  %ux%ux%u  %s  barriers %u  bindings %u%s\n",
-                      static_cast<unsigned long long>(n.index),
-                      n.flags & DispatchNote::kMissingCs ? "-" : n.shader[0] ? n.shader : "-",
-                      n.flags & DispatchNote::kMissingCs && n.missing[0] ? " (missing " : "",
-                      n.flags & DispatchNote::kMissingCs && n.missing[0] ? n.missing : "",
-                      n.flags & DispatchNote::kMissingCs && n.missing[0] ? ")" : "",
-                      n.x, n.y, n.z,
-                      n.flags & DispatchNote::kIndirect ? "indirect" : "direct",
-                      n.barriers, n.bindings,
-                      n.flags & DispatchNote::kBarrierBefore ? " (a barrier before it, the compute-shadow copy-in)" : "");
+        if (n.flags & DispatchNote::kIndirect) {
+            std::snprintf(b, sizeof b, "  #%llu  cs %s%s%s%s  indirect args 0x%llx (dimensions unknown)  barriers %u  bindings %u%s\n",
+                          static_cast<unsigned long long>(n.index),
+                          n.flags & DispatchNote::kMissingCs ? "-" : n.shader[0] ? n.shader : "-",
+                          n.flags & DispatchNote::kMissingCs && n.missing[0] ? " (missing " : "",
+                          n.flags & DispatchNote::kMissingCs && n.missing[0] ? n.missing : "",
+                          n.flags & DispatchNote::kMissingCs && n.missing[0] ? ")" : "",
+                          static_cast<unsigned long long>(n.indirect),
+                          n.barriers, n.bindings,
+                          n.flags & DispatchNote::kBarrierBefore ? " (a barrier before it, the compute-shadow copy-in)" : "");
+        } else {
+            std::snprintf(b, sizeof b, "  #%llu  cs %s%s%s%s  %ux%ux%u  direct  barriers %u  bindings %u%s\n",
+                          static_cast<unsigned long long>(n.index),
+                          n.flags & DispatchNote::kMissingCs ? "-" : n.shader[0] ? n.shader : "-",
+                          n.flags & DispatchNote::kMissingCs && n.missing[0] ? " (missing " : "",
+                          n.flags & DispatchNote::kMissingCs && n.missing[0] ? n.missing : "",
+                          n.flags & DispatchNote::kMissingCs && n.missing[0] ? ")" : "",
+                          n.x, n.y, n.z,
+                          n.barriers, n.bindings,
+                          n.flags & DispatchNote::kBarrierBefore ? " (a barrier before it, the compute-shadow copy-in)" : "");
+        }
         out += b;
     }
     return out;

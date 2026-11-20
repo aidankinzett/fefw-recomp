@@ -45,7 +45,9 @@ void diag_clear_recent_files();
 // every call fails, and the reporter's file ends up describing a consequence (a fence wait 17 ms after the batch submit that really
 // failed, #81). The first non-success VkResult anywhere in the process is recorded here once, with the call and its site, the thread,
 // how far into the run it happened, the frames presented and the submit state at that moment, and is never replaced by a later
-// failure. Every call site that can fail with a device-level result wraps the call in NXRT_VK(), which costs one integer compare on
+// failure. Results a healthy run produces on purpose (VK_NOT_READY, VK_TIMEOUT, VK_INCOMPLETE, VK_SUBOPTIMAL_KHR,
+// VK_ERROR_OUT_OF_DATE_KHR) are not failures and are not recorded: a real device loss would otherwise be reported as a timeout or a
+// resize. Every call site that can fail with a device-level result wraps the call in NXRT_VK(), which costs one integer compare on
 // the success path (no lock, no allocation, nothing logged) and records the result only when it is not VK_SUCCESS.
 void diag_vk_note(int result, const char* call, const char* file, int line);
 template <class R>
